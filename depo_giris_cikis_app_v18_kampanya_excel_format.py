@@ -4,27 +4,32 @@ import numpy as np
 from io import BytesIO
 from datetime import datetime
 from pathlib import Path
+from openpyxl import load_workbook
+from openpyxl.styles import Font, PatternFill, Alignment
 
-# -----------------------------
-# CONFIG
-# -----------------------------
-st.set_page_config(layout="wide", page_title="Depo Dashboard")
+st.set_page_config(layout="wide")
 
 HISTORY_DIR = Path("history")
 HISTORY_DIR.mkdir(exist_ok=True)
 
-# -----------------------------
-# HELPERS
-# -----------------------------
+# -------------------------
+# HELPER
+# -------------------------
 def normalize_code(x):
     return str(x).strip()
+
+def excel_serial_to_date(val):
+    try:
+        return pd.to_datetime(val)
+    except:
+        return pd.NaT
 
 def get_week_start(date):
     return pd.to_datetime(date).to_period("W").start_time
 
-# -----------------------------
-# SUPPLY OKUMA (FIXED)
-# -----------------------------
+# -------------------------
+# SUPPLY OKUMA
+# -------------------------
 def read_supply_file(file):
 
     xls = pd.ExcelFile(file)
@@ -32,24 +37,26 @@ def read_supply_file(file):
 
     raw = pd.read_excel(file, sheet_name=sheet, header=None)
 
-    header_row = 0
+    header_row = None
     for i in range(min(10, len(raw))):
         row = raw.iloc[i]
-        date_count = sum(pd.to_datetime(v, errors="coerce") is not pd.NaT for v in row)
-        if date_count >= 2:
+        if sum(pd.to_datetime(v, errors="coerce") is not pd.NaT for v in row) >= 2:
             header_row = i
             break
+
+    if header_row is None:
+        header_row = 0
 
     headers = list(raw.iloc[header_row])
     df = raw.iloc[header_row + 1:].copy()
     df.columns = headers
+
     df = df.dropna(how="all")
 
-    # ürün kodu bul
     code_col = df.columns[0]
 
     df = df.rename(columns={code_col: "product_code"})
-    df["product_code"] = df["product_code"].astype(str)
+    df["product_code"] = df["product_code"].apply(normalize_code)
 
     date_cols = [c for c in df.columns if c != "product_code"]
 
@@ -57,24 +64,23 @@ def read_supply_file(file):
         id_vars=["product_code"],
         value_vars=date_cols,
         var_name="date",
-        value_name="inbound"
+        value_name="inbound_qty"
     )
 
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
-    df["inbound"] = pd.to_numeric(df["inbound"], errors="coerce").fillna(0)
+    df["inbound_qty"] = pd.to_numeric(df["inbound_qty"], errors="coerce").fillna(0)
 
     df = df.dropna(subset=["date"])
-    df = df[df["inbound"] != 0]
+    df = df[df["inbound_qty"] != 0]
 
     df["date"] = df["date"] - pd.Timedelta(days=7)
     df["week"] = df["date"].dt.to_period("W").astype(str)
 
     return df
 
-
-# -----------------------------
+# -------------------------
 # APO OKUMA
-# -----------------------------
+# -------------------------
 def read_apo_file(file):
 
     xls = pd.ExcelFile(file)
@@ -91,7 +97,7 @@ def read_apo_file(file):
     code_col = df.columns[0]
 
     df = df.rename(columns={code_col: "product_code"})
-    df["product_code"] = df["product_code"].astype(str)
+    df["product_code"] = df["product_code"].apply(normalize_code)
 
     date_cols = df.columns[1:]
 
@@ -99,24 +105,45 @@ def read_apo_file(file):
         id_vars=["product_code"],
         value_vars=date_cols,
         var_name="date",
-        value_name="outbound"
+        value_name="outbound_qty"
     )
 
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
-    df["outbound"] = pd.to_numeric(df["outbound"], errors="coerce").fillna(0)
+    df["outbound_qty"] = pd.to_numeric(df["outbound_qty"], errors="coerce").fillna(0)
 
     df = df.dropna(subset=["date"])
-    df = df[df["outbound"] != 0]
+    df = df[df["outbound_qty"] != 0]
 
     df["week"] = df["date"].dt.to_period("W").astype(str)
 
     return df
 
+# -------------------------
+# EXCEL FORMAT
+# -------------------------
+def format_excel(data):
 
-# -----------------------------
+    bio = BytesIO()
+    data.to_excel(bio, index=False)
+
+    bio.seek(0)
+    wb = load_workbook(bio)
+
+    ws = wb.active
+
+    for row in ws.iter_rows(min_row=2):
+        for cell in row:
+            if isinstance(cell.value, (int, float)):
+                cell.number_format = "#,##0"
+
+    out = BytesIO()
+    wb.save(out)
+    return out.getvalue()
+
+# -------------------------
 # UI
-# -----------------------------
-st.title("📦 Depo Kapasite Dashboard")
+# -------------------------
+st.title("📦 Depo Dashboard")
 
 supply_file = st.file_uploader("Supply dosyası")
 apo_file = st.file_uploader("APO dosyası")
@@ -134,17 +161,8 @@ with col3:
 
 if st.button("Hesapla"):
 
-    try:
-        supply = read_supply_file(supply_file)
-    except Exception as e:
-        st.error(f"Supply hata: {e}")
-        st.stop()
-
-    try:
-        apo = read_apo_file(apo_file)
-    except Exception as e:
-        st.error(f"APO hata: {e}")
-        st.stop()
+    supply = read_supply_file(supply_file)
+    apo = read_apo_file(apo_file)
 
     df = pd.merge(
         supply,
@@ -153,9 +171,9 @@ if st.button("Hesapla"):
         how="outer"
     ).fillna(0)
 
-    weekly = df.groupby("week")[["inbound", "outbound"]].sum().reset_index()
+    weekly = df.groupby("week")[["inbound_qty", "outbound_qty"]].sum().reset_index()
 
-    weekly["stock"] = weekly["inbound"].cumsum() - weekly["outbound"].cumsum()
+    weekly["stock"] = weekly["inbound_qty"].cumsum() - weekly["outbound_qty"].cumsum()
 
     weekly["palet"] = (weekly["stock"] / 2400).round(0)
 
@@ -163,39 +181,41 @@ if st.button("Hesapla"):
 
     st.dataframe(
         weekly.style.format({
-            "inbound": "{:,.0f}",
-            "outbound": "{:,.0f}",
+            "inbound_qty": "{:,.0f}",
+            "outbound_qty": "{:,.0f}",
             "stock": "{:,.0f}",
             "palet": "{:,.0f}",
             "kapasite_%": "{:,.0f}"
         })
     )
 
-    # ---------------- SAVE
-    output = BytesIO()
-    weekly.to_excel(output, index=False)
+    excel_bytes = format_excel(weekly)
 
-    st.session_state["report"] = output.getvalue()
+    st.session_state["report"] = excel_bytes
 
-# ---------------- SAVE PANEL
-st.divider()
+    st.download_button(
+        "Excel indir",
+        data=excel_bytes,
+        file_name="rapor.xlsx"
+    )
+
+# -------------------------
+# SAVE
+# -------------------------
 st.subheader("Kaydet")
 
 if "report" in st.session_state:
 
     name = st.text_input("Rapor adı", "depo_rapor")
 
-    if st.button("Geçmişe Kaydet"):
-
-        filename = f"{name}.xlsx"
-        path = HISTORY_DIR / filename
-
+    if st.button("Kaydet"):
+        path = HISTORY_DIR / f"{name}.xlsx"
         path.write_bytes(st.session_state["report"])
-
         st.success("Kaydedildi")
 
-# ---------------- HISTORY
-st.divider()
+# -------------------------
+# HISTORY
+# -------------------------
 st.subheader("Geçmiş")
 
 files = list(HISTORY_DIR.glob("*.xlsx"))
