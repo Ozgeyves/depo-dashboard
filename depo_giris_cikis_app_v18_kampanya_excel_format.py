@@ -717,6 +717,10 @@ def prepare_report(
     weekly.columns = [f"{metric}_{rtype}" for metric, rtype in weekly.columns]
     weekly = weekly.reset_index()
 
+    # Streamlit Cloud / farklı pandas versiyonlarında week_start bazen PeriodIndex kalabiliyor.
+    # Bu nedenle rapor tarih alanlarına geçmeden önce güvenli datetime formatına çeviriyoruz.
+    weekly["week_start"] = pd.to_datetime(weekly["week_start"].astype(str), errors="coerce")
+
     needed_cols = [
         "inbound_qty_Ana Ürün", "outbound_qty_Ana Ürün", "stock_qty_Ana Ürün", "pallet_Ana Ürün",
         "inbound_qty_Mini Sample", "outbound_qty_Mini Sample", "stock_qty_Mini Sample", "pallet_Mini Sample",
@@ -733,6 +737,7 @@ def prepare_report(
     # Bu yüzden strftime öncesinde kesin datetime'a çeviriyoruz.
     weekly["week_start"] = pd.to_datetime(weekly["week_start"], errors="coerce")
 
+    weekly["week_start"] = pd.to_datetime(weekly["week_start"], errors="coerce")
     report["Hafta"] = weekly["week_start"].dt.strftime("%Y-W%U")
     report["Hafta Başlangıcı"] = weekly["week_start"].dt.strftime("%d.%m.%Y")
     report["Kampanya"] = weekly["week_start"].apply(lambda x: assign_campaign(x, campaign_df))
