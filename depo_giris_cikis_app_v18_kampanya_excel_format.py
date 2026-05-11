@@ -728,11 +728,6 @@ def prepare_report(
             weekly[col] = 0
 
     report = pd.DataFrame()
-
-    # Cloud ortamında week_start bazen Period/obj olarak gelebiliyor.
-    # Bu yüzden strftime öncesinde kesin datetime'a çeviriyoruz.
-    weekly["week_start"] = pd.to_datetime(weekly["week_start"], errors="coerce")
-
     report["Hafta"] = weekly["week_start"].dt.strftime("%Y-W%U")
     report["Hafta Başlangıcı"] = weekly["week_start"].dt.strftime("%d.%m.%Y")
     report["Kampanya"] = weekly["week_start"].apply(lambda x: assign_campaign(x, campaign_df))
@@ -1247,16 +1242,6 @@ def render_planning_screen():
             category_check.to_excel(writer, sheet_name="Kategori Kontrol", index=False)
             campaign_df.to_excel(writer, sheet_name="Kampanya", index=False)
 
-            # Ekol dosyası yüklendiyse geçmiş rapora da ekle
-            if ekol_file is not None:
-                ekol_weekly_export, ekol_capacity_export = read_ekol_file(ekol_file)
-
-                if ekol_capacity_export is not None:
-                    ekol_capacity_export.to_excel(writer, sheet_name="Ekol Kapasite Özeti", index=False, header=False)
-
-                if ekol_weekly_export is not None:
-                    ekol_weekly_export.to_excel(writer, sheet_name="Ekol Haftalık Stok", index=False)
-
         formatted_report_bytes = format_excel_workbook(output.getvalue())
         st.session_state["last_report_bytes"] = formatted_report_bytes
         st.session_state["last_report_default_name"] = f"depo_giris_cikis_raporu_{datetime.now().strftime('%Y%m%d')}"
@@ -1369,8 +1354,6 @@ def render_depo_screen():
         "Depo Operasyon",
         "Aylık Giriş Çıkış",
         "Kampanya",
-        "Ekol Kapasite Özeti",
-        "Ekol Haftalık Stok",
     ]
 
     available_allowed_sheets = [s for s in allowed_sheets if s in xls_history.sheet_names]
@@ -1385,23 +1368,21 @@ def render_depo_screen():
         with tab:
             df = pd.read_excel(selected_path, sheet_name=sheet_name)
 
-            # Planlama hesaplarını gizle; Ekol sheetleri orijinal depo verisi olduğu için dokunma.
-            if sheet_name not in ["Ekol Kapasite Özeti", "Ekol Haftalık Stok"]:
-                hidden_keywords = [
-                    "Palet",
-                    "Tır",
-                    "Kapasite",
-                    "Stok Seviyesi",
-                    "Düşülecek",
-                    "Trend",
-                ]
+            hidden_keywords = [
+                "Palet",
+                "Tır",
+                "Kapasite",
+                "Stok Seviyesi",
+                "Düşülecek",
+                "Trend",
+            ]
 
-                visible_cols = [
-                    col for col in df.columns
-                    if not any(keyword.lower() in str(col).lower() for keyword in hidden_keywords)
-                ]
+            visible_cols = [
+                col for col in df.columns
+                if not any(keyword.lower() in str(col).lower() for keyword in hidden_keywords)
+            ]
 
-                df = df[visible_cols]
+            df = df[visible_cols]
 
             st.dataframe(
                 df.style.format(safe_format_cell, na_rep=""),
