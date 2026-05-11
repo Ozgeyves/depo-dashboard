@@ -822,14 +822,11 @@ if st.session_state["role"] == "depo":
 
     hidden_keywords = [
         "Palet",
-        "Tır",
         "Kapasite Kullanım",
         "Kalan Kapasite",
-        "Stok Seviyesi",
         "Düşülecek",
         "Trend",
         "pallet",
-        "truck",
     ]
 
     for tab, sheet_name in zip(tabs, available_sheets):
@@ -843,10 +840,14 @@ if st.session_state["role"] == "depo":
                     "Kampanya",
                     "Ana Ürün Giriş",
                     "Ana Ürün Çıkış",
+                    "Ana Ürün Ekol Stok Seviyesi",
                     "Mini Sample Giriş",
                     "Mini Sample Çıkış",
+                    "Mini Sample Ekol Stok Seviyesi",
                     "ADR Giriş",
                     "ADR Çıkış",
+                    "ADR Ekol Stok Seviyesi",
+                    "Tır Sayısı",
                 ]
                 df = df[[c for c in safe_cols if c in df.columns]]
             elif sheet_name not in ["Ekol Kapasite Özeti", "Ekol Haftalık Stok"]:
@@ -856,7 +857,14 @@ if st.session_state["role"] == "depo":
                 ]
                 df = df[visible_cols]
 
-            st.dataframe(df, use_container_width=True, height=520)
+            # Sayıları virgüllü ve ondalıksız göster
+            df_display = df.copy()
+            for col in df_display.columns:
+                numeric_col = pd.to_numeric(df_display[col], errors="coerce")
+                if numeric_col.notna().sum() > 0 and numeric_col.notna().sum() >= max(1, len(df_display) * 0.4):
+                    df_display[col] = numeric_col.map(lambda x: "" if pd.isna(x) else f"{x:,.0f}")
+
+            st.dataframe(df_display, use_container_width=True, height=520)
 
     with open(selected_path, "rb") as f:
         st.download_button(
