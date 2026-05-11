@@ -884,14 +884,9 @@ if calculate:
 
         # Excel görünümüne yakın rapor
         report = pd.DataFrame()
-           weekly["week_start"] = pd.to_datetime(
-        weekly["week_start"].astype(str),
-        errors="coerce"
-    )
-
-    report["Hafta"] = weekly["week_start"].dt.strftime("%Y-W%U")
-    report["Hafta Başlangıcı"] = weekly["week_start"].dt.strftime("%d.%m.%Y")
-    report["Kampanya"] = weekly["week_start"].apply(lambda x: assign_campaign(x, campaign_df))
+        weekly["week_start"] = pd.to_datetime(weekly["week_start"].astype(str), errors="coerce")
+        report["Hafta"] = weekly["week_start"].dt.strftime("%Y-W%U")
+        report["Hafta Başlangıcı"] = weekly["week_start"].dt.strftime("%d.%m.%Y")
         report["Kampanya"] = weekly["week_start"].apply(lambda x: assign_campaign(x, campaign_df))
 
         report["Ana Ürün Giriş"] = weekly["inbound_qty_Ana Ürün"]
@@ -1054,17 +1049,13 @@ if calculate:
 
     st.caption("Ekran performansı için tabloda ilk 5 ay gösterilir. Excel çıktısında tüm haftalar yer alır.")
 
-    styled_horizontal = (
-        horizontal
-        .style
-        .apply(lambda _: highlight_increased_pallet_columns(horizontal, increased_weeks), axis=None)
-        .apply(lambda _: highlight_after_horizon_columns(horizontal, after_horizon_weeks), axis=None)
-        .apply(lambda _: highlight_capacity_and_kpi(horizontal), axis=None)
-        .format(safe_format_cell, na_rep="")
-    )
+    display_cols = [
+        col for col in horizontal.columns
+        if str(col).split("\\n")[0] not in after_horizon_weeks
+    ]
+    horizontal_display = horizontal[display_cols] if display_cols else horizontal
 
-    horizontal_display = horizontal
-        st.dataframe(horizontal_display, use_container_width=True, height=520)
+    st.dataframe(horizontal_display, use_container_width=True, height=520)
 
     with st.expander("Okunan Kampanya Takvimi"):
         if campaign_df.empty:
