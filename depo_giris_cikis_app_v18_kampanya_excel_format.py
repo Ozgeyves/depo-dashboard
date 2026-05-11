@@ -800,7 +800,15 @@ def prepare_report(
 
     # Aylık özet
     monthly_summary = movement.copy()
-    monthly_summary["month"] = pd.to_datetime(monthly_summary["week_start"]).dt.strftime("%Y-%m")
+
+    # Cloud ortamında week_start bazen Period/obj kalabildiği için
+    # aylık tabloya geçmeden önce güvenli datetime dönüşümü yapıyoruz.
+    monthly_summary["week_start"] = pd.to_datetime(
+        monthly_summary["week_start"].astype(str),
+        errors="coerce"
+    )
+
+    monthly_summary["month"] = monthly_summary["week_start"].dt.strftime("%Y-%m")
     monthly_summary = (
         monthly_summary
         .groupby(["month", "report_type"], as_index=False)[["inbound_qty", "outbound_qty"]]
