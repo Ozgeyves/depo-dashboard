@@ -803,7 +803,6 @@ if st.session_state["role"] == "depo":
     allowed_sheets = [
         "Depo Operasyon",
         "Aylık Giriş Çıkış",
-        "Kampanya",
         "Ekol Kapasite Özeti",
         "Ekol Haftalık Stok",
     ]
@@ -850,6 +849,7 @@ if st.session_state["role"] == "depo":
                     "Tır Sayısı",
                 ]
                 df = df[[c for c in safe_cols if c in df.columns]]
+
             elif sheet_name not in ["Ekol Kapasite Özeti", "Ekol Haftalık Stok"]:
                 visible_cols = [
                     col for col in df.columns
@@ -857,8 +857,24 @@ if st.session_state["role"] == "depo":
                 ]
                 df = df[visible_cols]
 
+            # Depo Operasyon / Veri sheetlerini haftalar kolonlarda olacak şekilde göster.
+            if sheet_name in ["Depo Operasyon", "Veri"] and "Hafta" in df.columns:
+                meta_cols = ["Hafta", "Hafta Başlangıcı", "Kampanya"]
+                value_cols = [c for c in df.columns if c not in meta_cols]
+
+                df_for_pivot = df.copy()
+                df_for_pivot["Hafta Kolonu"] = df_for_pivot.apply(
+                    lambda r: f"{r.get('Hafta', '')}\n{r.get('Hafta Başlangıcı', '')}\n{r.get('Kampanya', '')}",
+                    axis=1
+                )
+
+                df_display = df_for_pivot.set_index("Hafta Kolonu")[value_cols].T
+
+            else:
+                df_display = df.copy()
+
             # Sayıları virgüllü ve ondalıksız göster
-            df_display = df.copy()
+            df_display = df_display.copy()
             for col in df_display.columns:
                 numeric_col = pd.to_numeric(df_display[col], errors="coerce")
                 if numeric_col.notna().sum() > 0 and numeric_col.notna().sum() >= max(1, len(df_display) * 0.4):
