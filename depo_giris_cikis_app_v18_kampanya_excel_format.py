@@ -814,7 +814,7 @@ if st.session_state["role"] == "depo":
         available_sheets = ["Veri"]
 
     if not available_sheets:
-        st.warning("Bu raporda depo ekranında gösterilecek uygun veri bulunamadı.")
+        st.warning("Bu raporda depo ekranında gösterilecek uygun veri bulunamadı. Raporu güncel tedarik ekranından tekrar kaydederseniz haftalık operasyon tablosu görünür.")
         st.stop()
 
     tabs = st.tabs(available_sheets)
@@ -870,6 +870,9 @@ if st.session_state["role"] == "depo":
 
                 df_display = df_for_pivot.set_index("Hafta Kolonu")[value_cols].T
 
+                st.subheader("Haftalık Operasyon Tablosu")
+                st.caption("Haftalar kolonlarda; giriş, çıkış, stok seviyesi ve tır bilgisi satırlarda gösterilir.")
+
             else:
                 df_display = df.copy()
 
@@ -892,6 +895,13 @@ if st.session_state["role"] == "depo":
 
     st.stop()
 
+
+
+# TEDARIK_LOGOUT_INSERTED
+if st.session_state.get("role") == "tedarik":
+    if st.sidebar.button("Çıkış Yap"):
+        st.session_state["role"] = None
+        st.rerun()
 
 # ------------------------------------------------------------
 # UI
