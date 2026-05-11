@@ -801,7 +801,7 @@ if st.session_state["role"] == "depo":
         st.stop()
 
     allowed_sheets = [
-        "Depo Operasyon",
+        "Depo Haftalık Operasyon",
         "Aylık Giriş Çıkış",
         "Ekol Kapasite Özeti",
         "Ekol Haftalık Stok",
@@ -832,7 +832,12 @@ if st.session_state["role"] == "depo":
         with tab:
             df = pd.read_excel(selected_path, sheet_name=sheet_name)
 
-            if sheet_name == "Veri":
+            if sheet_name == "Depo Haftalık Operasyon":
+                st.subheader("Haftalık Operasyon Tablosu")
+                st.caption("Haftalar kolonlarda; giriş, çıkış, stok seviyesi ve tır bilgisi satırlarda gösterilir.")
+                df_display = df.copy()
+
+            elif sheet_name == "Veri":
                 safe_cols = [
                     "Hafta",
                     "Hafta Başlangıcı",
@@ -850,28 +855,24 @@ if st.session_state["role"] == "depo":
                 ]
                 df = df[[c for c in safe_cols if c in df.columns]]
 
+                if "Hafta" in df.columns:
+                    meta_cols = ["Hafta", "Hafta Başlangıcı", "Kampanya"]
+                    value_cols = [c for c in df.columns if c not in meta_cols]
+                    df_for_pivot = df.copy()
+                    df_for_pivot["Hafta Kolonu"] = df_for_pivot.apply(
+                        lambda r: f"{r.get('Hafta', '')}\n{r.get('Hafta Başlangıcı', '')}\n{r.get('Kampanya', '')}",
+                        axis=1
+                    )
+                    df_display = df_for_pivot.set_index("Hafta Kolonu")[value_cols].T
+                else:
+                    df_display = df.copy()
+
             elif sheet_name not in ["Ekol Kapasite Özeti", "Ekol Haftalık Stok"]:
                 visible_cols = [
                     col for col in df.columns
                     if not any(k.lower() in str(col).lower() for k in hidden_keywords)
                 ]
-                df = df[visible_cols]
-
-            # Depo Operasyon / Veri sheetlerini haftalar kolonlarda olacak şekilde göster.
-            if sheet_name in ["Depo Operasyon", "Veri"] and "Hafta" in df.columns:
-                meta_cols = ["Hafta", "Hafta Başlangıcı", "Kampanya"]
-                value_cols = [c for c in df.columns if c not in meta_cols]
-
-                df_for_pivot = df.copy()
-                df_for_pivot["Hafta Kolonu"] = df_for_pivot.apply(
-                    lambda r: f"{r.get('Hafta', '')}\n{r.get('Hafta Başlangıcı', '')}\n{r.get('Kampanya', '')}",
-                    axis=1
-                )
-
-                df_display = df_for_pivot.set_index("Hafta Kolonu")[value_cols].T
-
-                st.subheader("Haftalık Operasyon Tablosu")
-                st.caption("Haftalar kolonlarda; giriş, çıkış, stok seviyesi ve tır bilgisi satırlarda gösterilir.")
+                df_display = df[visible_cols]
 
             else:
                 df_display = df.copy()
@@ -1396,10 +1397,44 @@ if calculate:
         except Exception as e:
             st.error(f"Ekol dosyası okunurken hata oluştu: {e}")
 
+    # Depo ekranı için haftalık yatay operasyon tablosu
+    depo_operasyon_cols = [
+        "Hafta",
+        "Hafta Başlangıcı",
+        "Kampanya",
+        "Ana Ürün Giriş",
+        "Ana Ürün Çıkış",
+        "Ana Ürün Ekol Stok Seviyesi",
+        "Mini Sample Giriş",
+        "Mini Sample Çıkış",
+        "Mini Sample Ekol Stok Seviyesi",
+        "ADR Giriş",
+        "ADR Çıkış",
+        "ADR Ekol Stok Seviyesi",
+        "Tır Sayısı",
+    ]
+
+    depo_operasyon = weekly[[c for c in depo_operasyon_cols if c in weekly.columns]].copy()
+
+    if not depo_operasyon.empty and "Hafta" in depo_operasyon.columns:
+        meta_cols = ["Hafta", "Hafta Başlangıcı", "Kampanya"]
+        value_cols = [c for c in depo_operasyon.columns if c not in meta_cols]
+
+        depo_operasyon["Hafta Kolonu"] = depo_operasyon.apply(
+            lambda r: f"{r.get('Hafta', '')}\n{r.get('Hafta Başlangıcı', '')}\n{r.get('Kampanya', '')}",
+            axis=1
+        )
+
+        depo_yatay_operasyon = depo_operasyon.set_index("Hafta Kolonu")[value_cols].T
+    else:
+        depo_yatay_operasyon = pd.DataFrame()
+
     # Excel export
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         horizontal.to_excel(writer, sheet_name="Yatay Özet")
+        depo_yatay_operasyon.to_excel(writer, sheet_name="Depo Haftalık Operasyon")
+        depo_operasyon.to_excel(writer, sheet_name="Depo Operasyon", index=False)
         mevcut_hafta_report.to_excel(writer, sheet_name="Mevcut Hafta Palet", index=False)
         monthly_horizontal.to_excel(writer, sheet_name="Aylık Giriş Çıkış")
         weekly.to_excel(writer, sheet_name="Veri", index=False)
