@@ -2,33 +2,55 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import re
 from io import BytesIO
 from datetime import datetime
-from pathlib import Path
-import re
-
 from openpyxl import load_workbook
 from openpyxl.styles import Font, PatternFill, Alignment
+from pathlib import Path
 
-
-# ============================================================
-# PAGE CONFIG
-# ============================================================
-st.set_page_config(
-    page_title="Depo Dashboard",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+st.set_page_config(page_title="Depo Giriş Çıkış Dashboard", layout="wide")
 
 APP_DIR = Path(__file__).parent
-HISTORY_DIR = APP_DIR / "history"
+HISTORY_DIR = APP_DIR / "gecmis_raporlar"
 HISTORY_DIR.mkdir(exist_ok=True)
 
+# ------------------------------------------------------------
+# HELPERS
+# ------------------------------------------------------------
+def excel_serial_to_date(value):
+    """Excel serial veya normal tarih değerini pandas datetime'a çevirir."""
+    if pd.isna(value):
+        return pd.NaT
 
-# ============================================================
-# GENERAL HELPERS
-# ============================================================
+    # Excel serial date
+    if isinstance(value, (int, float, np.integer, np.floating)):
+        return pd.to_datetime("1899-12-30") + pd.to_timedelta(float(value), unit="D")
+
+    # String / datetime
+    return pd.to_datetime(value, dayfirst=True, errors="coerce")
+
+
+def normalize_code(value):
+    """Ürün kodlarını 504.0 / '00504' / '4188 UN1266' gibi durumlara karşı normalize eder."""
+    if pd.isna(value):
+        return None
+
+    text = str(value).strip()
+
+    # 4188 UN1266 gibi hücrelerde ilk sayı ürün kodudur.
+    match = re.search(r"\d+", text)
+    if match:
+        text = match.group(0)
+
+    if text.endswith(".0"):
+        text = text[:-2]
+
+    return text.lstrip("0") or "0"
+
+
 def clean_text(value):
+    """Türkçe karakter / boşluk / büyük-küçük harf farklarını temizler."""
     if pd.isna(value):
         return ""
 
@@ -56,153 +78,21 @@ def clean_text(value):
     return text
 
 
-def normalize_code(value):
-    """Ürün kodlarını 504.0 / '00504' / '4188 UN1266' gibi durumlara karşı normalize eder."""
-    if pd.isna(value):
-        return None
-
-    text = str(value).strip()
-
-    match = re.search(r"\d+", text)
-    if match:
-        text = match.group(0)
-
-    if text.endswith(".0"):
-        text = text[:-2]
-
-    return text.lstrip("0") or "0"
-
-
-def excel_serial_to_date(value):
-    """Excel serial, string veya datetime değerini tarihe çevirir."""
-    if pd.isna(value):
-        return pd.NaT
-
-    if isinstance(value, (int, float, np.integer, np.floating)):
-        # Excel serial date
-        if value > 10000:
-            return pd.to_datetime("1899-12-30") + pd.to_timedelta(float(value), unit="D")
-
-    return pd.to_datetime(value, dayfirst=True, errors="coerce")
-
-
-def looks_like_date(value):
-    return not pd.isna(excel_serial_to_date(value))
-
-
-def get_week_start(date_series):
-    date_series = pd.to_datetime(date_series, errors="coerce")
-    return date_series - pd.to_timedelta(date_series.dt.weekday, unit="D")
-
-
-def safe_format_cell(x):
-    if isinstance(x, (int, float, np.integer, np.floating)) and not pd.isna(x):
-        return f"{x:,.0f}"
-    return x
-
-
-def safe_divide(a, b):
-    if b == 0:
-        return 0
-    return a / b
-
-
-def add_months(ts, months):
-    return pd.Timestamp(ts) + pd.DateOffset(months=months)
-
-
-# ============================================================
-# AUTH
-# ============================================================
-def get_secret_value(key, default_value):
-    try:
-        return st.secrets[key]
-    except Exception:
-        return default_value
-
-
-def login():
-    planning_password = get_secret_value("PLANNING_PASSWORD", "planning2026")
-    depo_password = get_secret_value("DEPO_PASSWORD", "depo2026")
-
-    if "role" not in st.session_state:
-        st.session_state["role"] = None
-
-    if st.session_state["role"]:
-        return st.session_state["role"]
-
-    logo_path = APP_DIR / "logo.png"
-    if logo_path.exists():
-        st.image(str(logo_path), width=110)
-
-    st.title("Depo Dashboard")
-    st.caption("Lütfen size verilen şifre ile giriş yapın.")
-
-    password = st.text_input("Şifre", type="password")
-
-    if st.button("Giriş Yap"):
-        if password == planning_password:
-            st.session_state["role"] = "planning"
-            st.rerun()
-        elif password == depo_password:
-            st.session_state["role"] = "depo"
-            st.rerun()
-        else:
-            st.error("Şifre hatalı.")
-
-    st.stop()
-
-
-# ============================================================
-# FILE READERS
-# ============================================================
-def find_product_code_column(df):
-    candidates = []
-
-    for col in df.columns:
-        col_text = clean_text(col)
-        if (
-            "product" in col_text or
-            "code" in col_text or
-            "kod" in col_text or
-            "article" in col_text or
-            "current" in col_text
-        ):
-            candidates.append(col)
-
-    for col in candidates:
-        if df[col].notna().sum() > 0:
-            return col
-
-    for col in df.columns:
-        if df[col].notna().sum() > 0:
-            return col
-
-    return df.columns[0]
-
-
-def find_product_name_column(df, code_col):
-    for col in df.columns:
-        col_text = clean_text(col)
-        if col != code_col and ("name" in col_text or "libelle" in col_text or "urun adi" in col_text):
-            return col
-
-    cols = list(df.columns)
-    if code_col in cols:
-        idx = cols.index(code_col)
-        if idx + 1 < len(cols):
-            return cols[idx + 1]
-
-    return code_col
-
-
 def normalize_product_type(value):
+    """
+    Ürün tipi dosyasındaki farklı yazımları tek standarda indirir.
+    Sadece 3 kategori kullanıyoruz:
+    - Ana Ürün
+    - Mini Sample
+    - ADR, ADR sheetinden ayrıca yakalanır.
+    """
     text = clean_text(value)
 
     if not text:
         return "Ana Ürün"
 
-    mini_keywords = ["mini", "sample", "tester", "sachet", "numune", "deneme"]
+    # Önce Mini/Sample yakalanmalı. Çünkü bazı açıklamalarda ana kelimesi de geçebilir.
+    mini_keywords = ["mini", "sample", "tester", "sachet", "numune", "deneme", "mini sample"]
     if any(k in text for k in mini_keywords):
         return "Mini Sample"
 
@@ -210,10 +100,21 @@ def normalize_product_type(value):
     if any(k in text for k in ana_keywords):
         return "Ana Ürün"
 
+    # Tanınmayanları kaybetmemek için Ana Ürün kabul ediyoruz.
     return "Ana Ürün"
 
 
+def get_week_start(date_series):
+    """Her tarihi haftanın pazartesi gününe çeker."""
+    date_series = pd.to_datetime(date_series, errors="coerce")
+    return date_series - pd.to_timedelta(date_series.dt.weekday, unit="D")
+
+
 def read_code_sheet(xls, possible_sheet_names):
+    """
+    Verilen olası sheet isimlerinden birini bulur.
+    Sheet içindeki ilk dolu kolonu ürün kodu kabul eder.
+    """
     existing_sheets = {clean_text(s): s for s in xls.sheet_names}
 
     selected_sheet = None
@@ -232,6 +133,7 @@ def read_code_sheet(xls, possible_sheet_names):
     if df.empty:
         return set(), selected_sheet
 
+    # İlk dolu kolonu kod kolonu kabul et
     first_valid_col = None
     for col in df.columns:
         if df[col].notna().sum() > 0:
@@ -245,7 +147,15 @@ def read_code_sheet(xls, possible_sheet_names):
     return codes, selected_sheet
 
 
+
 def read_campaign_sheet(xls):
+    """
+    Kampanya sheetini esnek okur.
+    Desteklenen yapı örnekleri:
+    - Sheet adı kampanya / Kampanya / campaign
+    - Kolonlar: WINDOW-Campaign / Start / End
+    - Header satırı dosyada 1., 2. veya 3. satırda olabilir.
+    """
     campaign_sheet = None
 
     for sheet in xls.sheet_names:
@@ -268,28 +178,37 @@ def read_campaign_sheet(xls):
     start_col = None
     end_col = None
 
+    # İlk 15 satırda header arıyoruz
     for idx in range(min(15, len(raw))):
         row = raw.iloc[idx]
 
         for col_idx, value in row.items():
             text = clean_text(value)
-            original = str(value).lower()
 
             if not text:
                 continue
 
             if campaign_col is None and (
-                "window" in text or "campaign" in text or "kampanya" in text or "period" in text
+                "window" in text or
+                "campaign" in text or
+                "kampanya" in text or
+                "period" in text
             ):
                 campaign_col = col_idx
 
             if start_col is None and (
-                text == "start" or "baslangic" in text or "başlangıç" in original or "start date" in text
+                text == "start" or
+                "baslangic" in text or
+                "başlangıç" in str(value).lower() or
+                "start date" in text
             ):
                 start_col = col_idx
 
             if end_col is None and (
-                text == "end" or "bitis" in text or "bitiş" in original or "end date" in text
+                text == "end" or
+                "bitis" in text or
+                "bitiş" in str(value).lower() or
+                "end date" in text
             ):
                 end_col = col_idx
 
@@ -297,6 +216,7 @@ def read_campaign_sheet(xls):
             header_row = idx
             break
 
+    # Header bulunamazsa eski standart yapıya fallback: 0=campaign, 2=start, 3=end
     if header_row is None:
         header_row = 2 if len(raw) > 2 else 0
         campaign_col = 0
@@ -304,6 +224,9 @@ def read_campaign_sheet(xls):
         end_col = 3
 
     data = raw.iloc[header_row + 1:].copy()
+
+    # Bazı dosyalarda header satırı olmadığı halde data 2. satırdan başlıyor olabilir.
+    # Eğer fallback data boş kalırsa header row dahil dene.
     if data.empty:
         data = raw.iloc[header_row:].copy()
 
@@ -327,8 +250,22 @@ def read_campaign_sheet(xls):
 
 
 def read_mapping_file(mapping_file):
+    """
+    Ürün tipi dosyasını okur.
+
+    Tercih edilen yeni yapı:
+    - Ana Ürün sheet: kod listesi
+    - Mini Sample sheet: kod listesi
+    - ADR sheet: kod listesi
+    - kampanya sheet: WINDOW / Start / End
+
+    Eski yapı da desteklenir:
+    - ürün tipi sheet: Current Code / Ürün Tipi
+    - Adr sheet: Article
+    """
     xls = pd.ExcelFile(mapping_file)
 
+    # Yeni, net yapı: ayrı sheetlerden kod okuma
     ana_codes, ana_sheet = read_code_sheet(
         xls,
         ["Ana Ürün", "Ana Urun", "Ana", "Main", "Ana Kodlar"]
@@ -354,7 +291,7 @@ def read_mapping_file(mapping_file):
 
     type_map = pd.DataFrame(mapping_rows)
 
-    # Eski ürün tipi sheet varsa eksikleri tamamla
+    # Eğer ayrı Ana Ürün sheet yoksa ama "ürün tipi" sheet varsa, Ana/Mini bilgisini buradan tamamla.
     if any(clean_text(s) == clean_text("ürün tipi") for s in xls.sheet_names):
         product_type_df = pd.read_excel(mapping_file, sheet_name="ürün tipi")
         product_type_df.columns = [str(c).strip() for c in product_type_df.columns]
@@ -375,8 +312,12 @@ def read_mapping_file(mapping_file):
                 .drop_duplicates(subset=["product_code"], keep="first")
             )
 
+            # Ayrı sheetlerden gelen bilgi varsa öncelik ayrı sheetlerde, eksikler ürün tipi sheetinden tamamlanır.
             type_map = pd.concat([old_map, type_map], ignore_index=True)
             type_map = type_map.drop_duplicates(subset=["product_code"], keep="last")
+
+    # ADR sheet eski formatta sadece Article kolonundan da gelebilir; yukarıdaki ilk dolu kolon zaten bunu yakalar.
+    # Öncelik ADR'de: bir kod ADR listesinde varsa raporda ADR sayılacak.
 
     if type_map.empty:
         type_map = pd.DataFrame(columns=["product_code", "product_type"])
@@ -398,41 +339,23 @@ def read_mapping_file(mapping_file):
 
 
 def read_supply_file(supply_file):
-    xls = pd.ExcelFile(supply_file)
+    """
+    Supply dosyasında 'supply' sheetini okur.
+    Beklenen yapı:
+    Row 2: Libellé- | Calendar day | 20/04/2026 | 27/04/2026 ...
+    Row 4+: Product code | Product name | quantities...
+    """
+    raw = pd.read_excel(supply_file, sheet_name="supply", header=None)
 
-    sheet_name = None
-    for s in xls.sheet_names:
-        if clean_text(s) == "supply":
-            sheet_name = s
-            break
-    if sheet_name is None:
-        sheet_name = xls.sheet_names[0]
-
-    raw = pd.read_excel(supply_file, sheet_name=sheet_name, header=None)
-
-    header_row = None
-    for i in range(min(10, len(raw))):
-        row = raw.iloc[i]
-        date_count = sum(looks_like_date(v) for v in row.tolist())
-        if date_count >= 2:
-            header_row = i
-            break
-
-    if header_row is None:
-        header_row = 0
-
+    header_row = 1
     headers = list(raw.iloc[header_row])
-    df = raw.iloc[header_row + 1:].copy()
+    df = raw.iloc[header_row + 2:].copy()
     df.columns = headers
-    df = df.dropna(how="all")
-    df = df.loc[:, df.columns.notna()]
 
-    code_col = find_product_code_column(df)
-    name_col = find_product_name_column(df, code_col)
-
-    date_cols = [col for col in df.columns if col not in [code_col, name_col] and looks_like_date(col)]
-    if not date_cols:
-        date_cols = [col for col in df.columns if col not in [code_col, name_col]]
+    # İlk iki kolon: ürün kodu ve ürün adı
+    code_col = headers[0]
+    name_col = headers[1]
+    date_cols = headers[2:]
 
     df = df.rename(columns={code_col: "product_code", name_col: "product_name"})
     df["product_code"] = df["product_code"].apply(normalize_code)
@@ -445,40 +368,28 @@ def read_supply_file(supply_file):
     )
 
     long_df["date"] = long_df["date"].apply(excel_serial_to_date)
+    # Supply dosyasındaki tarih, gerçek depo girişinden 1 hafta sonrası olduğu için 7 gün geri çekiyoruz.
     long_df["date"] = long_df["date"] - pd.Timedelta(days=7)
     long_df["inbound_qty"] = pd.to_numeric(long_df["inbound_qty"], errors="coerce").fillna(0)
 
     long_df = long_df.dropna(subset=["product_code", "date"])
     long_df = long_df[long_df["inbound_qty"] != 0]
+
     long_df["week_start"] = get_week_start(long_df["date"])
 
     return long_df
 
 
 def read_apo_file(apo_file):
-    xls = pd.ExcelFile(apo_file)
+    """
+    APO Forecast dosyasında 'Weekly ForeCast' sheetini okur.
+    Beklenen yapı:
+    Row 2: tarih serialleri
+    Row 3+: ürün kodu ve haftalık çıkış forecastleri
+    """
+    raw = pd.read_excel(apo_file, sheet_name="Weekly ForeCast", header=None)
 
-    sheet_name = None
-    for s in xls.sheet_names:
-        if "weekly" in clean_text(s) and "forecast" in clean_text(s):
-            sheet_name = s
-            break
-    if sheet_name is None:
-        sheet_name = xls.sheet_names[0]
-
-    raw = pd.read_excel(apo_file, sheet_name=sheet_name, header=None)
-
-    date_row = None
-    for i in range(min(10, len(raw))):
-        row = raw.iloc[i]
-        date_count = sum(looks_like_date(v) for v in row.tolist())
-        if date_count >= 2:
-            date_row = i
-            break
-
-    if date_row is None:
-        date_row = 1 if len(raw) > 1 else 0
-
+    date_row = 1
     date_values = list(raw.iloc[date_row, 1:])
 
     df = raw.iloc[date_row + 1:].copy()
@@ -494,9 +405,6 @@ def read_apo_file(apo_file):
     df = df.rename(columns=rename_map)
     date_cols = [c for c in df.columns if isinstance(c, pd.Timestamp)]
 
-    if not date_cols:
-        date_cols = [c for c in df.columns if c != "product_code"]
-
     df["product_code"] = df["product_code"].apply(normalize_code)
 
     long_df = df.melt(
@@ -511,72 +419,28 @@ def read_apo_file(apo_file):
 
     long_df = long_df.dropna(subset=["product_code", "date"])
     long_df = long_df[long_df["outbound_qty"] != 0]
+
     long_df["week_start"] = get_week_start(long_df["date"])
 
     return long_df
 
 
-def read_ekol_file(ekol_file):
-    """
-    Ekol dosyasını esnek okur.
-    Hem haftalık depo yeri stoklarını hem de kapasite özetini ayrı tablolar olarak çıkarmaya çalışır.
-    """
-    if ekol_file is None:
-        return None, None
-
-    xls = pd.ExcelFile(ekol_file)
-    sheet_name = xls.sheet_names[0]
-    raw = pd.read_excel(ekol_file, sheet_name=sheet_name, header=None)
-
-    # Kapasite özetini bulmaya çalış
-    capacity_rows = []
-    for i in range(len(raw)):
-        row_text = " ".join([str(x) for x in raw.iloc[i].dropna().tolist()])
-        if "Kapasite" in row_text or "Doluluk" in row_text or "Boş" in row_text or "Bos" in row_text:
-            # Bu satırdan sonraki 10 satırı dene
-            cap = raw.iloc[i:i+12].copy()
-            cap = cap.dropna(how="all")
-            if not cap.empty:
-                capacity_rows = cap
-            break
-
-    ekol_capacity = None
-    if isinstance(capacity_rows, pd.DataFrame) and not capacity_rows.empty:
-        ekol_capacity = capacity_rows.reset_index(drop=True)
-
-    # Haftalık stok tablosu: ilk iki kolon + tarih kolonları gibi oku
-    header_row = None
-    for i in range(min(10, len(raw))):
-        row = raw.iloc[i]
-        date_count = sum(looks_like_date(v) for v in row.tolist())
-        if date_count >= 2:
-            header_row = i
-            break
-
-    ekol_weekly = None
-    if header_row is not None:
-        headers = list(raw.iloc[header_row])
-        df = raw.iloc[header_row + 1:].copy()
-        df.columns = headers
-        df = df.dropna(how="all")
-        ekol_weekly = df
-
-    return ekol_weekly, ekol_capacity
-
-
-# ============================================================
-# CALCULATION
-# ============================================================
 def add_product_type(df, type_map, adr_codes):
+    """
+    Ana/Mini kırılımını oluşturur.
+    Önemli: ADR ürünler Ana Ürün içinden çıkarılmaz.
+    ADR ayrıca ikinci bir hesap olarak gösterilir ve final paletten düşülür.
+    """
     df = df.copy()
     df["product_code"] = df["product_code"].apply(normalize_code)
 
     df = df.merge(type_map, on="product_code", how="left")
     df["product_type"] = df["product_type"].fillna("Ana Ürün")
     df["product_type"] = df["product_type"].replace({"Merch": "Ana Ürün", "Diğer": "Ana Ürün"})
+
     df["is_adr"] = df["product_code"].isin(adr_codes)
 
-    # ADR ana ürün içinde kalır, ayrıca ek hesap olarak gösterilir.
+    # Ana/Mini rapor tipi. ADR burada Ana'nın içinde kalır.
     df["report_type"] = df["product_type"]
 
     return df
@@ -586,7 +450,6 @@ def assign_campaign(week_start, campaign_df):
     if campaign_df.empty or pd.isna(week_start):
         return ""
 
-    week_start = pd.to_datetime(week_start)
     week_end = week_start + pd.Timedelta(days=6)
 
     active = campaign_df[
@@ -600,351 +463,19 @@ def assign_campaign(week_start, campaign_df):
     return " / ".join(active["campaign"].astype(str).unique())
 
 
-def prepare_report(
-    supply_file,
-    apo_file,
-    mapping_file,
-    ana_palet_ici,
-    mini_palet_ici,
-    adr_palet_ici,
-    sarf_palet,
-    tir_kapasitesi,
-    initial_ana,
-    initial_mini,
-    initial_adr,
-    depo_kapasitesi,
-    takip_esigi,
-    kritik_esigi
-):
-    type_map, adr_codes, campaign_df, sheet_info = read_mapping_file(mapping_file)
+def safe_divide(a, b):
+    if b == 0:
+        return 0
+    return a / b
 
-    supply_long = read_supply_file(supply_file)
-    apo_long = read_apo_file(apo_file)
-
-    supply_long = add_product_type(supply_long, type_map, adr_codes)
-    apo_long = add_product_type(apo_long, type_map, adr_codes)
-
-    # Ana/Mini hesapları: ADR ana içinde kalır
-    inbound_base = (
-        supply_long
-        .groupby(["week_start", "report_type"], as_index=False)["inbound_qty"]
-        .sum()
-    )
-
-    outbound_base = (
-        apo_long
-        .groupby(["week_start", "report_type"], as_index=False)["outbound_qty"]
-        .sum()
-    )
-
-    # ADR ayrıca gösterilir
-    inbound_adr = (
-        supply_long[supply_long["is_adr"]]
-        .groupby("week_start", as_index=False)["inbound_qty"]
-        .sum()
-    )
-    inbound_adr["report_type"] = "ADR"
-
-    outbound_adr = (
-        apo_long[apo_long["is_adr"]]
-        .groupby("week_start", as_index=False)["outbound_qty"]
-        .sum()
-    )
-    outbound_adr["report_type"] = "ADR"
-
-    inbound = pd.concat([inbound_base, inbound_adr], ignore_index=True)
-    outbound = pd.concat([outbound_base, outbound_adr], ignore_index=True)
-
-    movement = pd.merge(
-        inbound,
-        outbound,
-        on=["week_start", "report_type"],
-        how="outer"
-    ).fillna(0)
-
-    all_weeks = pd.DataFrame({"week_start": sorted(movement["week_start"].dropna().unique())})
-    all_types = pd.DataFrame({"report_type": ["Ana Ürün", "Mini Sample", "ADR"]})
-    grid = all_weeks.merge(all_types, how="cross")
-
-    movement = grid.merge(movement, on=["week_start", "report_type"], how="left").fillna(0)
-    movement = movement.sort_values(["report_type", "week_start"])
-
-    pallet_map = {
-        "Ana Ürün": ana_palet_ici,
-        "Mini Sample": mini_palet_ici,
-        "ADR": adr_palet_ici,
-    }
-
-    initial_stock_map = {
-        "Ana Ürün": initial_ana,
-        "Mini Sample": initial_mini,
-        "ADR": initial_adr,
-    }
-
-    stock_rows = []
-
-    for report_type, g in movement.groupby("report_type"):
-        current_stock = initial_stock_map.get(report_type, 0)
-
-        for _, row in g.sort_values("week_start").iterrows():
-            current_stock = current_stock + row["inbound_qty"] - row["outbound_qty"]
-
-            pallet_inner = pallet_map.get(report_type, ana_palet_ici)
-            pallet = safe_divide(current_stock, pallet_inner)
-
-            stock_rows.append({
-                "week_start": row["week_start"],
-                "report_type": report_type,
-                "inbound_qty": row["inbound_qty"],
-                "outbound_qty": row["outbound_qty"],
-                "stock_qty": current_stock,
-                "pallet_inner": pallet_inner,
-                "pallet": pallet,
-            })
-
-    detail = pd.DataFrame(stock_rows)
-
-    weekly = (
-        detail
-        .pivot_table(
-            index="week_start",
-            columns="report_type",
-            values=["inbound_qty", "outbound_qty", "stock_qty", "pallet"],
-            aggfunc="sum"
-        )
-    )
-
-    weekly.columns = [f"{metric}_{rtype}" for metric, rtype in weekly.columns]
-    weekly = weekly.reset_index()
-
-    # Streamlit Cloud / farklı pandas versiyonlarında week_start bazen PeriodIndex kalabiliyor.
-    # Bu nedenle rapor tarih alanlarına geçmeden önce güvenli datetime formatına çeviriyoruz.
-    weekly["week_start"] = pd.to_datetime(weekly["week_start"].astype(str), errors="coerce")
-
-    needed_cols = [
-        "inbound_qty_Ana Ürün", "outbound_qty_Ana Ürün", "stock_qty_Ana Ürün", "pallet_Ana Ürün",
-        "inbound_qty_Mini Sample", "outbound_qty_Mini Sample", "stock_qty_Mini Sample", "pallet_Mini Sample",
-        "inbound_qty_ADR", "outbound_qty_ADR", "stock_qty_ADR", "pallet_ADR",
-    ]
-
-    for col in needed_cols:
-        if col not in weekly.columns:
-            weekly[col] = 0
-
-    report = pd.DataFrame()
-
-    # Cloud ortamında week_start bazen Period/obj olarak gelebiliyor.
-    # Bu yüzden strftime öncesinde kesin datetime'a çeviriyoruz.
-    weekly["week_start"] = pd.to_datetime(weekly["week_start"], errors="coerce")
-
-    weekly["week_start"] = pd.to_datetime(weekly["week_start"], errors="coerce")
-    report["Hafta"] = weekly["week_start"].dt.strftime("%Y-W%U")
-    report["Hafta Başlangıcı"] = weekly["week_start"].dt.strftime("%d.%m.%Y")
-    report["Kampanya"] = weekly["week_start"].apply(lambda x: assign_campaign(x, campaign_df))
-
-    report["Ana Ürün Giriş"] = weekly["inbound_qty_Ana Ürün"]
-    report["Ana Ürün Çıkış"] = weekly["outbound_qty_Ana Ürün"]
-    report["Ana Ürün Ekol Stok Seviyesi"] = weekly["stock_qty_Ana Ürün"]
-    report["Ana Ürün Palet"] = weekly["pallet_Ana Ürün"]
-    report["Ana Ürün Giriş Paleti"] = report["Ana Ürün Giriş"] / ana_palet_ici
-
-    report["Mini Sample Giriş"] = weekly["inbound_qty_Mini Sample"]
-    report["Mini Sample Çıkış"] = weekly["outbound_qty_Mini Sample"]
-    report["Mini Sample Ekol Stok Seviyesi"] = weekly["stock_qty_Mini Sample"]
-    report["Mini Sample Palet"] = weekly["pallet_Mini Sample"]
-    report["Mini Sample Giriş Paleti"] = report["Mini Sample Giriş"] / mini_palet_ici
-
-    report["ADR Giriş"] = weekly["inbound_qty_ADR"]
-    report["ADR Çıkış"] = weekly["outbound_qty_ADR"]
-    report["ADR Ekol Stok Seviyesi"] = weekly["stock_qty_ADR"]
-    report["ADR Palet"] = weekly["pallet_ADR"]
-
-    report["Sarf Palet"] = sarf_palet
-    report["ADR Düşülecek Palet"] = report["ADR Palet"]
-    report["Total Palet"] = (
-        report["Ana Ürün Palet"] +
-        report["Mini Sample Palet"] +
-        report["Sarf Palet"] -
-        report["ADR Düşülecek Palet"]
-    )
-
-    # Tır: sadece o haftaki giriş paleti
-    report["Tır Sayısı"] = (
-        report["Ana Ürün Giriş Paleti"] +
-        report["Mini Sample Giriş Paleti"]
-    ) / tir_kapasitesi
-
-    report["Kapasite Kullanım %"] = report["Total Palet"] / depo_kapasitesi * 100
-    report["Kalan Kapasite Palet"] = depo_kapasitesi - report["Total Palet"]
-
-    report["Haftalık Palet Değişimi"] = report["Total Palet"].diff().fillna(0)
-
-    def capacity_status(value):
-        if value >= 100:
-            return "Kapasite Aşımı"
-        if value >= kritik_esigi:
-            return "Kritik"
-        if value >= takip_esigi:
-            return "Takip"
-        return "Güvenli"
-
-    report["Kapasite Durumu"] = report["Kapasite Kullanım %"].apply(capacity_status)
-    report["Palet Trend"] = np.where(
-        report["Haftalık Palet Değişimi"] > 0,
-        "Artış",
-        np.where(report["Haftalık Palet Değişimi"] < 0, "Azalış", "Sabit")
-    )
-
-    numeric_cols = report.select_dtypes(include=[np.number]).columns
-    report[numeric_cols] = report[numeric_cols].round(0)
-
-    # Aylık özet
-    monthly_summary = movement.copy()
-
-    # Cloud ortamında week_start bazen Period/obj kalabildiği için
-    # aylık tabloya geçmeden önce güvenli datetime dönüşümü yapıyoruz.
-    monthly_summary["week_start"] = pd.to_datetime(
-        monthly_summary["week_start"].astype(str),
-        errors="coerce"
-    )
-
-    monthly_summary["month"] = monthly_summary["week_start"].dt.strftime("%Y-%m")
-    monthly_summary = (
-        monthly_summary
-        .groupby(["month", "report_type"], as_index=False)[["inbound_qty", "outbound_qty"]]
-        .sum()
-    )
-
-    monthly_summary = monthly_summary.pivot_table(
-        index="month",
-        columns="report_type",
-        values=["inbound_qty", "outbound_qty"],
-        aggfunc="sum",
-        fill_value=0
-    )
-
-    monthly_summary.columns = [f"{metric}_{rtype}" for metric, rtype in monthly_summary.columns]
-    monthly_summary = monthly_summary.reset_index()
-
-    for col in [
-        "inbound_qty_Ana Ürün", "outbound_qty_Ana Ürün",
-        "inbound_qty_Mini Sample", "outbound_qty_Mini Sample",
-        "inbound_qty_ADR", "outbound_qty_ADR"
-    ]:
-        if col not in monthly_summary.columns:
-            monthly_summary[col] = 0
-
-    monthly_report = pd.DataFrame()
-    monthly_report["Ay"] = monthly_summary["month"]
-    monthly_report["Ana Ürün Giriş"] = monthly_summary["inbound_qty_Ana Ürün"]
-    monthly_report["Ana Ürün Çıkış"] = monthly_summary["outbound_qty_Ana Ürün"]
-    monthly_report["Mini Sample Giriş"] = monthly_summary["inbound_qty_Mini Sample"]
-    monthly_report["Mini Sample Çıkış"] = monthly_summary["outbound_qty_Mini Sample"]
-    monthly_report["ADR Giriş"] = monthly_summary["inbound_qty_ADR"]
-    monthly_report["ADR Çıkış"] = monthly_summary["outbound_qty_ADR"]
-
-    monthly_numeric_cols = monthly_report.select_dtypes(include=[np.number]).columns
-    monthly_report[monthly_numeric_cols] = monthly_report[monthly_numeric_cols].round(0)
-
-    # Mevcut hafta palet tablosu
-    mevcut_ana_palet = safe_divide(initial_ana, ana_palet_ici)
-    mevcut_mini_palet = safe_divide(initial_mini, mini_palet_ici)
-    mevcut_adr_palet = safe_divide(initial_adr, adr_palet_ici)
-    mevcut_total_palet = mevcut_ana_palet + mevcut_mini_palet + sarf_palet - mevcut_adr_palet
-
-    mevcut_hafta_report = pd.DataFrame({
-        "Kategori": ["Ana Ürün", "Mini Sample", "ADR", "Sarf", "Total"],
-        "Başlangıç Stok": [initial_ana, initial_mini, initial_adr, np.nan, np.nan],
-        "Palet İçi": [ana_palet_ici, mini_palet_ici, adr_palet_ici, np.nan, np.nan],
-        "Mevcut Hafta Palet": [
-            mevcut_ana_palet,
-            mevcut_mini_palet,
-            mevcut_adr_palet,
-            sarf_palet,
-            mevcut_total_palet
-        ]
-    })
-
-    for col in ["Başlangıç Stok", "Palet İçi", "Mevcut Hafta Palet"]:
-        mevcut_hafta_report[col] = pd.to_numeric(mevcut_hafta_report[col], errors="coerce").round(0)
-
-    # Kategori kontrol
-    supply_check_base = supply_long.copy()
-    supply_check_adr = supply_long[supply_long["is_adr"]].copy()
-    supply_check_adr["report_type"] = "ADR"
-    supply_check_all = pd.concat([supply_check_base, supply_check_adr], ignore_index=True)
-
-    apo_check_base = apo_long.copy()
-    apo_check_adr = apo_long[apo_long["is_adr"]].copy()
-    apo_check_adr["report_type"] = "ADR"
-    apo_check_all = pd.concat([apo_check_base, apo_check_adr], ignore_index=True)
-
-    supply_category_check = (
-        supply_check_all
-        .groupby("report_type")
-        .agg(
-            supply_total_qty=("inbound_qty", "sum"),
-            supply_product_count=("product_code", "nunique")
-        )
-        .reset_index()
-    )
-
-    apo_category_check = (
-        apo_check_all
-        .groupby("report_type")
-        .agg(
-            apo_total_qty=("outbound_qty", "sum"),
-            apo_product_count=("product_code", "nunique")
-        )
-        .reset_index()
-    )
-
-    category_check = pd.merge(
-        supply_category_check,
-        apo_category_check,
-        on="report_type",
-        how="outer"
-    ).fillna(0)
-
-    return {
-        "report": report,
-        "monthly_report": monthly_report,
-        "mevcut_hafta_report": mevcut_hafta_report,
-        "detail": detail,
-        "campaign_df": campaign_df,
-        "sheet_info": sheet_info,
-        "category_check": category_check,
-    }
-
-
-# ============================================================
-# STYLING
-# ============================================================
-def highlight_increased_pallet_columns(dataframe, increased_weeks):
-    styles = pd.DataFrame("", index=dataframe.index, columns=dataframe.columns)
-
-    for col in dataframe.columns:
-        week_key = str(col).split("\n")[0]
-        if week_key in increased_weeks:
-            styles[col] = "background-color: #f8d7da; color: #842029; font-weight: 600;"
-
-    return styles
-
-
-def highlight_after_horizon_columns(dataframe, horizon_week_keys):
-    styles = pd.DataFrame("", index=dataframe.index, columns=dataframe.columns)
-
-    for col in dataframe.columns:
-        week_key = str(col).split("\n")[0]
-        if week_key in horizon_week_keys:
-            styles[col] = "background-color: #fde2e2; border-left: 4px solid #c0392b;"
-
-    return styles
-
-
-def highlight_capacity_and_kpi(df, takip_esigi=85, kritik_esigi=99):
+def highlight_capacity_and_kpi(df):
+    """
+    Palet, tır ve kapasite risk alanlarını renklendirir.
+    Hem yatay hem dikey tabloda çalışır.
+    """
     styles = pd.DataFrame("", index=df.index, columns=df.columns)
 
+    # Yatay tabloda satır adına göre renklendirme
     for row_label in df.index:
         row_text = str(row_label)
 
@@ -974,10 +505,104 @@ def highlight_capacity_and_kpi(df, takip_esigi=85, kritik_esigi=99):
                 else:
                     styles.loc[row_label, col] = "background-color: #abebc6; font-weight: bold;"
 
+        if "Haftalık Palet Değişimi" in row_text:
+            for col in df.columns:
+                val = pd.to_numeric(pd.Series([df.loc[row_label, col]]), errors="coerce").iloc[0]
+                if pd.isna(val):
+                    continue
+                if val > 0:
+                    styles.loc[row_label, col] = "background-color: #f8d7da; color: #842029; font-weight: bold;"
+                elif val < 0:
+                    styles.loc[row_label, col] = "background-color: #d1e7dd; color: #0f5132; font-weight: bold;"
+
+    # Dikey tabloda kolon adına göre renklendirme
+    for col in df.columns:
+        col_text = str(col)
+
+        if "Palet" in col_text:
+            styles[col] = "background-color: #d6eaf8;"
+
+        if "ADR Palet" in col_text:
+            styles[col] = "background-color: #fdebd0;"
+
+        if "Total Palet" in col_text:
+            styles[col] = "background-color: #d5f5e3; font-weight: bold;"
+
+        if "Tır Sayısı" in col_text:
+            styles[col] = "background-color: #e8daef; font-weight: bold;"
+
+        if "Kapasite Kullanım %" in col_text:
+            for i, val in enumerate(pd.to_numeric(df[col], errors="coerce")):
+                if pd.isna(val):
+                    continue
+                if val >= 100:
+                    styles.iloc[i, df.columns.get_loc(col)] = "background-color: #c0392b; color: white; font-weight: bold;"
+                elif val >= kritik_esigi:
+                    styles.iloc[i, df.columns.get_loc(col)] = "background-color: #f5b7b1; font-weight: bold;"
+                elif val >= takip_esigi:
+                    styles.iloc[i, df.columns.get_loc(col)] = "background-color: #f9e79f; font-weight: bold;"
+                else:
+                    styles.iloc[i, df.columns.get_loc(col)] = "background-color: #abebc6; font-weight: bold;"
+
+        if "Haftalık Palet Değişimi" in col_text:
+            for i, val in enumerate(pd.to_numeric(df[col], errors="coerce")):
+                if pd.isna(val):
+                    continue
+                if val > 0:
+                    styles.iloc[i, df.columns.get_loc(col)] = "background-color: #f8d7da; color: #842029; font-weight: bold;"
+                elif val < 0:
+                    styles.iloc[i, df.columns.get_loc(col)] = "background-color: #d1e7dd; color: #0f5132; font-weight: bold;"
+
     return styles
 
 
+def highlight_increased_pallet_columns(dataframe, increased_weeks):
+    """
+    Yatay tabloda Total Palet bir önceki haftaya göre artmışsa,
+    ilgili haftanın tüm kolonunu açık kırmızı gösterir.
+    """
+    styles = pd.DataFrame("", index=dataframe.index, columns=dataframe.columns)
+
+    for col in dataframe.columns:
+        week_key = str(col).split("\\n")[0]
+        if week_key in increased_weeks:
+            styles[col] = "background-color: #f8d7da; color: #842029; font-weight: 600;"
+
+    return styles
+
+
+
+
+def add_months(ts, months):
+    """Pandas Timestamp üzerine ay ekler."""
+    return pd.Timestamp(ts) + pd.DateOffset(months=months)
+
+
+def highlight_after_horizon_columns(dataframe, horizon_week_keys):
+    """
+    5 ay sonrası veri tam olmadığı için ilgili hafta kolonlarını kırmızı/pembe işaretler.
+    """
+    styles = pd.DataFrame("", index=dataframe.index, columns=dataframe.columns)
+
+    for col in dataframe.columns:
+        week_key = str(col).split("\\n")[0]
+        if week_key in horizon_week_keys:
+            styles[col] = "background-color: #fde2e2; border-left: 4px solid #c0392b;"
+
+    return styles
+
+
+def safe_format_cell(x):
+    """Sayıları virgüllü ve ondalıksız gösterir; metinleri olduğu gibi bırakır."""
+    if isinstance(x, (int, float, np.integer, np.floating)) and not pd.isna(x):
+        return f"{x:,.0f}"
+    return x
+
+
 def format_excel_workbook(excel_bytes):
+    """
+    Export edilen Excel dosyasındaki sayısal hücreleri virgüllü ve ondalıksız formatlar.
+    """
     bio = BytesIO(excel_bytes)
     wb = load_workbook(bio)
 
@@ -986,16 +611,19 @@ def format_excel_workbook(excel_bytes):
     number_format = '#,##0'
 
     for ws in wb.worksheets:
+        # Header formatı
         for cell in ws[1]:
             cell.font = header_font
             cell.fill = header_fill
             cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
+        # Sayı formatı
         for row in ws.iter_rows(min_row=2):
             for cell in row:
                 if isinstance(cell.value, (int, float)):
                     cell.number_format = number_format
 
+        # Kolon genişliği
         for col_cells in ws.columns:
             max_len = 0
             col_letter = col_cells[0].column_letter
@@ -1010,429 +638,565 @@ def format_excel_workbook(excel_bytes):
     return out.getvalue()
 
 
-# ============================================================
-# SCREEN HELPERS
-# ============================================================
-def show_header(title, subtitle=None):
-    logo_path = APP_DIR / "logo.png"
+# ------------------------------------------------------------
+# UI
+# ------------------------------------------------------------
+st.title("Depo Giriş - Çıkış & Palet Dashboard")
 
-    if logo_path.exists():
-        col_logo, col_title = st.columns([1, 8])
-        with col_logo:
-            st.image(str(logo_path), width=85)
-        with col_title:
-            st.title(title)
-            if subtitle:
-                st.caption(subtitle)
+st.write(
+    "Supply girişlerini, APO çıkış forecastini ve ürün tipi dosyasını yükleyerek "
+    "haftalık Ekol stok, palet, ADR palet ve tır hesabını oluşturabilirsiniz."
+)
+
+with st.sidebar:
+    st.header("Dosyalar")
+
+    supply_file = st.file_uploader("Supply dosyası", type=["xlsx", "xlsm"])
+    apo_file = st.file_uploader("APO Forecast dosyası", type=["xlsx", "xlsm"])
+    mapping_file = st.file_uploader("Ürün Tipi + Kampanya + ADR dosyası", type=["xlsx", "xlsm"])
+
+    st.header("Palet Parametreleri")
+    ana_palet_ici = st.number_input("Ana Ürün Palet İçi", min_value=1, value=2400, step=50)
+    mini_palet_ici = st.number_input("Mini Sample Palet İçi", min_value=1, value=15000, step=100)
+    adr_palet_ici = st.number_input("ADR Palet İçi", min_value=1, value=5540, step=10)
+
+    sarf_palet = st.number_input("Haftalık Sarf Palet", min_value=0.0, value=250.0, step=0.5)
+    tir_kapasitesi = st.number_input("1 Tır Kaç Palet?", min_value=1, value=40, step=1)
+
+    st.header("Depo Kapasite Parametreleri")
+    depo_kapasitesi = st.number_input("Depo Maksimum Palet Kapasitesi", min_value=1.0, value=1100.0, step=100.0)
+    takip_esigi = st.number_input("Takip Eşiği (%)", min_value=0.0, max_value=100.0, value=85.0, step=1.0)
+    kritik_esigi = st.number_input("Kritik Eşiği (%)", min_value=0.0, max_value=100.0, value=99.0, step=1.0)
+
+    st.header("Başlangıç Stok")
+    initial_ana = st.number_input("Başlangıç Ana Ürün Stok", value=0, step=1000)
+    initial_mini = st.number_input("Başlangıç Mini Sample Stok", value=0, step=1000)
+    initial_adr = st.number_input("Başlangıç ADR Stok", value=0, step=1000)
+
+    calculate = st.button("Raporu Hesapla", type="primary")
+
+
+pallet_map = {
+    "Ana Ürün": ana_palet_ici,
+    "Mini Sample": mini_palet_ici,
+    "ADR": adr_palet_ici,
+}
+
+initial_stock_map = {
+    "Ana Ürün": initial_ana,
+    "Mini Sample": initial_mini,
+    "ADR": initial_adr,
+}
+
+mevcut_ana_palet = initial_ana / ana_palet_ici if ana_palet_ici else 0
+mevcut_mini_palet = initial_mini / mini_palet_ici if mini_palet_ici else 0
+mevcut_adr_palet = initial_adr / adr_palet_ici if adr_palet_ici else 0
+mevcut_total_palet = mevcut_ana_palet + mevcut_mini_palet + sarf_palet - mevcut_adr_palet
+
+
+if calculate:
+    if not supply_file or not apo_file or not mapping_file:
+        st.error("Lütfen Supply, APO Forecast ve Ürün Tipi dosyalarının üçünü de yükleyin.")
+        st.stop()
+
+    with st.spinner("Dosyalar okunuyor ve rapor hazırlanıyor..."):
+        type_map, adr_codes, campaign_df, sheet_info = read_mapping_file(mapping_file)
+
+        supply_long = read_supply_file(supply_file)
+        apo_long = read_apo_file(apo_file)
+
+        supply_long = add_product_type(supply_long, type_map, adr_codes)
+        apo_long = add_product_type(apo_long, type_map, adr_codes)
+
+        # Kontrol için kategori bazlı adet / kod sayısı
+        supply_check_base = supply_long.copy()
+        supply_check_adr = supply_long[supply_long["is_adr"]].copy()
+        supply_check_adr["report_type"] = "ADR"
+        supply_check_all = pd.concat([supply_check_base, supply_check_adr], ignore_index=True)
+
+        apo_check_base = apo_long.copy()
+        apo_check_adr = apo_long[apo_long["is_adr"]].copy()
+        apo_check_adr["report_type"] = "ADR"
+        apo_check_all = pd.concat([apo_check_base, apo_check_adr], ignore_index=True)
+
+        supply_category_check = (
+            supply_check_all
+            .groupby("report_type")
+            .agg(
+                supply_total_qty=("inbound_qty", "sum"),
+                supply_product_count=("product_code", "nunique")
+            )
+            .reset_index()
+        )
+
+        apo_category_check = (
+            apo_check_all
+            .groupby("report_type")
+            .agg(
+                apo_total_qty=("outbound_qty", "sum"),
+                apo_product_count=("product_code", "nunique")
+            )
+            .reset_index()
+        )
+
+        category_check = pd.merge(
+            supply_category_check,
+            apo_category_check,
+            on="report_type",
+            how="outer"
+        ).fillna(0)
+
+        # Ana/Mini hesapları: ADR ürünler Ana Ürün içinde kalır.
+        inbound_base = (
+            supply_long
+            .groupby(["week_start", "report_type"], as_index=False)["inbound_qty"]
+            .sum()
+        )
+
+        outbound_base = (
+            apo_long
+            .groupby(["week_start", "report_type"], as_index=False)["outbound_qty"]
+            .sum()
+        )
+
+        # ADR ayrıca gösterilir: Ana Ürün içinden düşülmez, sadece ek satır olarak hesaplanır.
+        inbound_adr = (
+            supply_long[supply_long["is_adr"]]
+            .groupby("week_start", as_index=False)["inbound_qty"]
+            .sum()
+        )
+        inbound_adr["report_type"] = "ADR"
+
+        outbound_adr = (
+            apo_long[apo_long["is_adr"]]
+            .groupby("week_start", as_index=False)["outbound_qty"]
+            .sum()
+        )
+        outbound_adr["report_type"] = "ADR"
+
+        inbound = pd.concat([inbound_base, inbound_adr], ignore_index=True)
+        outbound = pd.concat([outbound_base, outbound_adr], ignore_index=True)
+
+        movement = pd.merge(
+            inbound,
+            outbound,
+            on=["week_start", "report_type"],
+            how="outer"
+        ).fillna(0)
+
+        # Aylık giriş / çıkış toplamları
+        monthly_summary = movement.copy()
+        monthly_summary["week_start"] = pd.to_datetime(monthly_summary["week_start"].astype(str), errors="coerce")
+        monthly_summary["month"] = monthly_summary["week_start"].dt.strftime("%Y-%m")
+        monthly_summary = (
+            monthly_summary
+            .groupby(["month", "report_type"], as_index=False)[["inbound_qty", "outbound_qty"]]
+            .sum()
+        )
+
+        monthly_summary = monthly_summary.pivot_table(
+            index="month",
+            columns="report_type",
+            values=["inbound_qty", "outbound_qty"],
+            aggfunc="sum",
+            fill_value=0
+        )
+
+        monthly_summary.columns = [f"{metric}_{rtype}" for metric, rtype in monthly_summary.columns]
+        monthly_summary = monthly_summary.reset_index()
+
+        monthly_report = pd.DataFrame()
+        monthly_report["Ay"] = monthly_summary["month"]
+
+        for col in [
+            "inbound_qty_Ana Ürün", "outbound_qty_Ana Ürün",
+            "inbound_qty_Mini Sample", "outbound_qty_Mini Sample",
+            "inbound_qty_ADR", "outbound_qty_ADR"
+        ]:
+            if col not in monthly_summary.columns:
+                monthly_summary[col] = 0
+
+        monthly_report["Ana Ürün Giriş"] = monthly_summary["inbound_qty_Ana Ürün"]
+        monthly_report["Ana Ürün Çıkış"] = monthly_summary["outbound_qty_Ana Ürün"]
+        monthly_report["Mini Sample Giriş"] = monthly_summary["inbound_qty_Mini Sample"]
+        monthly_report["Mini Sample Çıkış"] = monthly_summary["outbound_qty_Mini Sample"]
+        monthly_report["ADR Giriş"] = monthly_summary["inbound_qty_ADR"]
+        monthly_report["ADR Çıkış"] = monthly_summary["outbound_qty_ADR"]
+
+        monthly_numeric_cols = monthly_report.select_dtypes(include=[np.number]).columns
+        monthly_report[monthly_numeric_cols] = monthly_report[monthly_numeric_cols].round(0).astype(int)
+
+        # Tüm haftalar x tüm tipler matrisi
+        all_weeks = pd.DataFrame({"week_start": sorted(movement["week_start"].dropna().unique())})
+        all_types = pd.DataFrame({"report_type": ["Ana Ürün", "Mini Sample", "ADR"]})
+        grid = all_weeks.merge(all_types, how="cross")
+
+        movement = grid.merge(movement, on=["week_start", "report_type"], how="left").fillna(0)
+        movement = movement.sort_values(["report_type", "week_start"])
+
+        # Kümülatif stok
+        stock_rows = []
+        for report_type, g in movement.groupby("report_type"):
+            current_stock = initial_stock_map.get(report_type, 0)
+
+            for _, row in g.sort_values("week_start").iterrows():
+                current_stock = current_stock + row["inbound_qty"] - row["outbound_qty"]
+
+                pallet_inner = pallet_map.get(report_type, ana_palet_ici)
+                pallet = safe_divide(current_stock, pallet_inner)
+
+                stock_rows.append({
+                    "week_start": row["week_start"],
+                    "report_type": report_type,
+                    "inbound_qty": row["inbound_qty"],
+                    "outbound_qty": row["outbound_qty"],
+                    "stock_qty": current_stock,
+                    "pallet_inner": pallet_inner,
+                    "pallet": pallet,
+                })
+
+        detail = pd.DataFrame(stock_rows)
+
+        # Haftalık özet
+        weekly = (
+            detail
+            .pivot_table(
+                index="week_start",
+                columns="report_type",
+                values=["inbound_qty", "outbound_qty", "stock_qty", "pallet"],
+                aggfunc="sum"
+            )
+        )
+
+        weekly.columns = [f"{metric}_{rtype}" for metric, rtype in weekly.columns]
+        weekly = weekly.reset_index()
+
+        # Eksik kolonları oluştur
+        needed_numeric_cols = [
+            "inbound_qty_Ana Ürün", "outbound_qty_Ana Ürün", "stock_qty_Ana Ürün", "pallet_Ana Ürün",
+            "inbound_qty_Mini Sample", "outbound_qty_Mini Sample", "stock_qty_Mini Sample", "pallet_Mini Sample",
+            "inbound_qty_ADR", "outbound_qty_ADR", "stock_qty_ADR", "pallet_ADR",
+        ]
+
+        for col in needed_numeric_cols:
+            if col not in weekly.columns:
+                weekly[col] = 0
+
+        # Excel görünümüne yakın rapor
+        report = pd.DataFrame()
+        weekly["week_start"] = pd.to_datetime(weekly["week_start"].astype(str), errors="coerce")
+    report["Hafta"] = weekly["week_start"].dt.strftime("%Y-W%U")
+        report["Hafta Başlangıcı"] = weekly["week_start"].dt.strftime("%d.%m.%Y")
+        report["Kampanya"] = weekly["week_start"].apply(lambda x: assign_campaign(x, campaign_df))
+
+        report["Ana Ürün Giriş"] = weekly["inbound_qty_Ana Ürün"]
+        report["Ana Ürün Çıkış"] = weekly["outbound_qty_Ana Ürün"]
+        report["Ana Ürün Ekol Stok Seviyesi"] = weekly["stock_qty_Ana Ürün"]
+        report["Ana Ürün Palet"] = weekly["pallet_Ana Ürün"]
+        report["Ana Ürün Giriş Paleti"] = report["Ana Ürün Giriş"] / ana_palet_ici
+
+        report["Mini Sample Giriş"] = weekly["inbound_qty_Mini Sample"]
+        report["Mini Sample Çıkış"] = weekly["outbound_qty_Mini Sample"]
+        report["Mini Sample Ekol Stok Seviyesi"] = weekly["stock_qty_Mini Sample"]
+        report["Mini Sample Palet"] = weekly["pallet_Mini Sample"]
+        report["Mini Sample Giriş Paleti"] = report["Mini Sample Giriş"] / mini_palet_ici
+
+        report["ADR Giriş"] = weekly["inbound_qty_ADR"]
+        report["ADR Çıkış"] = weekly["outbound_qty_ADR"]
+        report["ADR Ekol Stok Seviyesi"] = weekly["stock_qty_ADR"]
+        report["ADR Palet"] = weekly["pallet_ADR"]
+
+        # ADR palet ayrı gösterilir ve final total paletten düşülür.
+        report["Sarf Palet"] = sarf_palet
+        report["ADR Düşülecek Palet"] = report["ADR Palet"]
+        report["Total Palet"] = (
+            report["Ana Ürün Palet"] +
+            report["Mini Sample Palet"] +
+            report["Sarf Palet"] -
+            report["ADR Düşülecek Palet"]
+        )
+
+        # Tır sayısı hesabı: sadece o haftaki girişlerin Ana Ürün + Mini Sample giriş paleti üzerinden yapılır.
+        report["Tır Sayısı"] = (
+            report["Ana Ürün Giriş Paleti"] +
+            report["Mini Sample Giriş Paleti"]
+        ) / tir_kapasitesi
+
+        # Depo kapasite kontrol alanları
+        report["Kapasite Kullanım %"] = report["Total Palet"] / depo_kapasitesi * 100
+        report["Kalan Kapasite Palet"] = depo_kapasitesi - report["Total Palet"]
+        report["Haftalık Palet Değişimi"] = report["Total Palet"].diff().fillna(0)
+
+        def capacity_status(value):
+            if value >= 100:
+                return "Kapasite Aşımı"
+            if value >= kritik_esigi:
+                return "Kritik"
+            if value >= takip_esigi:
+                return "Takip"
+            return "Güvenli"
+
+        report["Kapasite Durumu"] = report["Kapasite Kullanım %"].apply(capacity_status)
+
+        report["Palet Trend"] = np.where(
+            report["Haftalık Palet Değişimi"] > 0,
+            "Artış",
+            np.where(report["Haftalık Palet Değişimi"] < 0, "Azalış", "Sabit")
+        )
+
+        numeric_cols = report.select_dtypes(include=[np.number]).columns
+        report[numeric_cols] = report[numeric_cols].round(0).astype(int)
+
+        weekly = report
+
+    st.success("Rapor hazır.")
+
+    # KPI'lar ilk haftanın değerlerini gösterir.
+    first_total = weekly["Total Palet"].iloc[0]
+    first_capacity = weekly["Kapasite Kullanım %"].iloc[0]
+    first_remaining = weekly["Kalan Kapasite Palet"].iloc[0]
+    first_status = weekly["Kapasite Durumu"].iloc[0]
+    first_week = weekly["Hafta"].iloc[0]
+
+    # Peak hafta sadece ilk 5 ay içinde aranır.
+    weekly_for_peak = weekly.copy()
+    weekly_for_peak["_date"] = pd.to_datetime(weekly_for_peak["Hafta Başlangıcı"], dayfirst=True, errors="coerce")
+    first_date = weekly_for_peak["_date"].min()
+    horizon_date = add_months(first_date, 5)
+    first_5_months = weekly_for_peak[weekly_for_peak["_date"] < horizon_date].copy()
+
+    if first_5_months.empty:
+        first_5_months = weekly_for_peak.copy()
+
+    peak_idx = first_5_months["Total Palet"].idxmax()
+    peak_week = first_5_months.loc[peak_idx, "Hafta"]
+    peak_pallet = first_5_months.loc[peak_idx, "Total Palet"]
+    increasing_week_count = int((first_5_months["Palet Trend"] == "Artış").sum())
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+
+    with c1:
+        st.metric("İlk Hafta Total Palet", f"{first_total:,.0f}", first_week)
+    with c2:
+        st.metric("İlk Hafta Kapasite %", f"{first_capacity:,.0f}%")
+    with c3:
+        st.metric("İlk Hafta Kalan Kapasite", f"{first_remaining:,.0f} palet")
+    with c4:
+        st.metric("Peak Hafta / İlk 5 Ay", f"{peak_week}", f"{peak_pallet:,.0f} palet")
+    with c5:
+        st.metric("Artan Hafta Sayısı / İlk 5 Ay", f"{increasing_week_count}")
+
+    if first_status in ["Kritik", "Kapasite Aşımı"]:
+        st.error(f"İlk hafta kapasite durumu: {first_status}")
+    elif first_status == "Takip":
+        st.warning(f"İlk hafta kapasite durumu: {first_status}")
     else:
-        st.title(title)
-        if subtitle:
-            st.caption(subtitle)
+        st.success(f"İlk hafta kapasite durumu: {first_status}")
 
+    st.subheader("Yatay Haftalık Görünüm / Excel Formatı")
 
-def render_planning_screen():
-    show_header("Depo Kapasite Dashboard", "Planning ekranı")
+    pivot_rows = [
+        "Ana Ürün Giriş",
+        "Ana Ürün Çıkış",
+        "Ana Ürün Ekol Stok Seviyesi",
+        "Ana Ürün Palet",
 
-    with st.sidebar:
-        if st.button("Çıkış Yap"):
-            st.session_state["role"] = None
-            st.rerun()
+        "Mini Sample Giriş",
+        "Mini Sample Çıkış",
+        "Mini Sample Ekol Stok Seviyesi",
+        "Mini Sample Palet",
 
-        st.header("Dosyalar")
-        supply_file = st.file_uploader("Supply dosyası", type=["xlsx", "xlsm"], key="planning_supply")
-        apo_file = st.file_uploader("APO Forecast dosyası", type=["xlsx", "xlsm"], key="planning_apo")
-        mapping_file = st.file_uploader("Ürün Tipi + Kampanya + ADR dosyası", type=["xlsx", "xlsm"], key="planning_mapping")
-        ekol_file = st.file_uploader("Ekol Depo Data Dosyası", type=["xlsx", "xlsm"], key="planning_ekol")
+        "ADR Giriş",
+        "ADR Çıkış",
+        "ADR Ekol Stok Seviyesi",
+        "ADR Palet",
 
-        st.header("Palet Parametreleri")
-        ana_palet_ici = st.number_input("Ana Ürün Palet İçi", min_value=1, value=2400, step=50)
-        mini_palet_ici = st.number_input("Mini Sample Palet İçi", min_value=1, value=15000, step=100)
-        adr_palet_ici = st.number_input("ADR Palet İçi", min_value=1, value=5540, step=10)
-        sarf_palet = st.number_input("Haftalık Sarf Palet", min_value=0.0, value=250.0, step=0.5)
-        tir_kapasitesi = st.number_input("1 Tır Kaç Palet?", min_value=1, value=40, step=1)
+        "Sarf Palet",
+        "ADR Düşülecek Palet",
+        "Total Palet",
+        "Kapasite Kullanım %",
+        "Kalan Kapasite Palet",
+        "Kapasite Durumu",
+        "Palet Trend",
+        "Tır Sayısı",
+    ]
 
-        st.header("Başlangıç Stok")
-        initial_ana = st.number_input("Başlangıç Ana Ürün Stok", value=0, step=1000)
-        initial_mini = st.number_input("Başlangıç Mini Sample Stok", value=0, step=1000)
-        initial_adr = st.number_input("Başlangıç ADR Stok", value=0, step=1000)
+    horizontal = weekly.set_index("Hafta")[pivot_rows].T
 
-        st.header("Depo Kapasite Parametreleri")
-        depo_kapasitesi = st.number_input("Depo Maksimum Palet Kapasitesi", min_value=1.0, value=1100.0, step=100.0)
-        takip_esigi = st.number_input("Takip Eşiği (%)", min_value=0.0, max_value=100.0, value=85.0, step=1.0)
-        kritik_esigi = st.number_input("Kritik Eşiği (%)", min_value=0.0, max_value=100.0, value=99.0, step=1.0)
+    weekly_date_map = weekly.set_index("Hafta")["Hafta Başlangıcı"]
+    campaign_row = weekly.set_index("Hafta")["Kampanya"]
 
-        calculate = st.button("Raporu Hesapla", type="primary")
+    horizontal.columns = [
+        f"{week}\n{weekly_date_map.loc[week]}\n{campaign_row.loc[week] if campaign_row.loc[week] else ''}"
+        for week in horizontal.columns
+    ]
 
-    if calculate:
-        if not supply_file or not apo_file or not mapping_file:
-            st.error("Lütfen Supply, APO Forecast ve Ürün Tipi dosyalarının üçünü de yükleyin.")
-            st.stop()
+    # Total Palet önceki haftaya göre artıyorsa o haftayı kritik kırmızı yap.
+    weekly_sorted = weekly.copy()
+    weekly_sorted["Total Palet Artış"] = weekly_sorted["Total Palet"].diff()
+    increased_weeks = weekly_sorted.loc[
+        weekly_sorted["Total Palet Artış"] > 0, "Hafta"
+    ].astype(str).tolist()
 
-        with st.spinner("Rapor hazırlanıyor..."):
-            data = prepare_report(
-                supply_file=supply_file,
-                apo_file=apo_file,
-                mapping_file=mapping_file,
-                ana_palet_ici=ana_palet_ici,
-                mini_palet_ici=mini_palet_ici,
-                adr_palet_ici=adr_palet_ici,
-                sarf_palet=sarf_palet,
-                tir_kapasitesi=tir_kapasitesi,
-                initial_ana=initial_ana,
-                initial_mini=initial_mini,
-                initial_adr=initial_adr,
-                depo_kapasitesi=depo_kapasitesi,
-                takip_esigi=takip_esigi,
-                kritik_esigi=kritik_esigi
-            )
+    # İlk 5 aydan sonraki haftaları kırmızı belirteçle işaretle.
+    weekly_horizon = weekly.copy()
+    weekly_horizon["_date"] = pd.to_datetime(weekly_horizon["Hafta Başlangıcı"], dayfirst=True, errors="coerce")
+    first_week_date = weekly_horizon["_date"].min()
+    horizon_limit = add_months(first_week_date, 5)
+    after_horizon_weeks = weekly_horizon.loc[
+        weekly_horizon["_date"] >= horizon_limit, "Hafta"
+    ].astype(str).tolist()
 
-        report = data["report"]
-        monthly_report = data["monthly_report"]
-        mevcut_hafta_report = data["mevcut_hafta_report"]
-        detail = data["detail"]
-        campaign_df = data["campaign_df"]
-        sheet_info = data["sheet_info"]
-        category_check = data["category_check"]
+    st.caption("Ekran performansı için tabloda ilk 5 ay gösterilir. Excel çıktısında tüm haftalar yer alır.")
 
-        # KPI'lar ilk hafta
-        first_total = report["Total Palet"].iloc[0]
-        first_capacity = report["Kapasite Kullanım %"].iloc[0]
-        first_remaining = report["Kalan Kapasite Palet"].iloc[0]
-        first_status = report["Kapasite Durumu"].iloc[0]
-        first_week = report["Hafta"].iloc[0]
+    styled_horizontal = (
+        horizontal
+        .style
+        .apply(lambda _: highlight_increased_pallet_columns(horizontal, increased_weeks), axis=None)
+        .apply(lambda _: highlight_after_horizon_columns(horizontal, after_horizon_weeks), axis=None)
+        .apply(lambda _: highlight_capacity_and_kpi(horizontal), axis=None)
+        .format(safe_format_cell, na_rep="")
+    )
 
-        # Peak ilk 5 ay
-        weekly_for_peak = report.copy()
-        weekly_for_peak["_date"] = pd.to_datetime(weekly_for_peak["Hafta Başlangıcı"], dayfirst=True, errors="coerce")
-        first_date = weekly_for_peak["_date"].min()
-        horizon_date = add_months(first_date, 5)
-        first_5_months = weekly_for_peak[weekly_for_peak["_date"] < horizon_date].copy()
-        if first_5_months.empty:
-            first_5_months = weekly_for_peak.copy()
+    horizontal_display = horizontal
+        st.dataframe(horizontal_display, use_container_width=True, height=520)
 
-        peak_idx = first_5_months["Total Palet"].idxmax()
-        peak_week = first_5_months.loc[peak_idx, "Hafta"]
-        peak_pallet = first_5_months.loc[peak_idx, "Total Palet"]
-        increasing_week_count = int((first_5_months["Palet Trend"] == "Artış").sum())
-
-        c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("İlk Hafta Total Palet", f"{first_total:,.0f}", first_week)
-        c2.metric("İlk Hafta Kapasite %", f"{first_capacity:,.0f}%")
-        c3.metric("İlk Hafta Kalan Kapasite", f"{first_remaining:,.0f} palet")
-        c4.metric("Peak Hafta / İlk 5 Ay", f"{peak_week}", f"{peak_pallet:,.0f} palet")
-        c5.metric("Artan Hafta Sayısı / İlk 5 Ay", f"{increasing_week_count}")
-
-        if first_status in ["Kritik", "Kapasite Aşımı"]:
-            st.error(f"İlk hafta kapasite durumu: {first_status}")
-        elif first_status == "Takip":
-            st.warning(f"İlk hafta kapasite durumu: {first_status}")
+    with st.expander("Okunan Kampanya Takvimi"):
+        if campaign_df.empty:
+            st.warning("Kampanya takvimi okunamadı. Kampanya sheetinde kampanya adı, start ve end tarihleri olduğundan emin olun.")
         else:
-            st.success(f"İlk hafta kapasite durumu: {first_status}")
+            campaign_view = campaign_df.copy()
+            campaign_view["start"] = campaign_view["start"].dt.strftime("%d.%m.%Y")
+            campaign_view["end"] = campaign_view["end"].dt.strftime("%d.%m.%Y")
+            st.dataframe(campaign_view, use_container_width=True)
 
-        # Yatay tablo
-        st.subheader("Yatay Haftalık Görünüm / Excel Formatı")
+    st.subheader("Mevcut Hafta Palet Tablosu")
 
-        pivot_rows = [
-            "Ana Ürün Giriş",
-            "Ana Ürün Çıkış",
-            "Ana Ürün Ekol Stok Seviyesi",
-            "Ana Ürün Palet",
-
-            "Mini Sample Giriş",
-            "Mini Sample Çıkış",
-            "Mini Sample Ekol Stok Seviyesi",
-            "Mini Sample Palet",
-
-            "ADR Giriş",
-            "ADR Çıkış",
-            "ADR Ekol Stok Seviyesi",
-            "ADR Palet",
-
-            "Sarf Palet",
-            "ADR Düşülecek Palet",
-            "Total Palet",
-            "Kapasite Kullanım %",
-            "Kalan Kapasite Palet",
-            "Kapasite Durumu",
-            "Palet Trend",
-            "Tır Sayısı",
+    mevcut_hafta_report = pd.DataFrame({
+        "Kategori": ["Ana Ürün", "Mini Sample", "ADR", "Sarf", "Total"],
+        "Başlangıç Stok": [initial_ana, initial_mini, initial_adr, np.nan, np.nan],
+        "Palet İçi": [ana_palet_ici, mini_palet_ici, adr_palet_ici, np.nan, np.nan],
+        "Mevcut Hafta Palet": [
+            mevcut_ana_palet,
+            mevcut_mini_palet,
+            mevcut_adr_palet,
+            sarf_palet,
+            mevcut_total_palet
         ]
+    })
 
-        horizontal = report.set_index("Hafta")[pivot_rows].T
+    for col in ["Başlangıç Stok", "Palet İçi", "Mevcut Hafta Palet"]:
+        mevcut_hafta_report[col] = pd.to_numeric(mevcut_hafta_report[col], errors="coerce").round(0)
 
-        weekly_date_map = report.set_index("Hafta")["Hafta Başlangıcı"]
-        campaign_row = report.set_index("Hafta")["Kampanya"]
+    st.dataframe(
+        mevcut_hafta_report.style.format({
+            "Başlangıç Stok": lambda x: "" if pd.isna(x) else f"{x:,.0f}",
+            "Palet İçi": lambda x: "" if pd.isna(x) else f"{x:,.0f}",
+            "Mevcut Hafta Palet": lambda x: "" if pd.isna(x) else f"{x:,.0f}",
+        }),
+        use_container_width=True
+    )
 
-        horizontal.columns = [
-            f"{week}\n{weekly_date_map.loc[week]}\n{campaign_row.loc[week] if campaign_row.loc[week] else ''}"
-            for week in horizontal.columns
-        ]
+    st.subheader("Aylık Giriş / Çıkış Toplamları")
 
-        weekly_sorted = report.copy()
-        weekly_sorted["Total Palet Artış"] = weekly_sorted["Total Palet"].diff()
-        increased_weeks = weekly_sorted.loc[
-            weekly_sorted["Total Palet Artış"] > 0, "Hafta"
-        ].astype(str).tolist()
+    monthly_horizontal = monthly_report.set_index("Ay").T
+    st.dataframe(monthly_horizontal, use_container_width=True, height=360)
 
-        weekly_horizon = report.copy()
-        weekly_horizon["_date"] = pd.to_datetime(weekly_horizon["Hafta Başlangıcı"], dayfirst=True, errors="coerce")
-        first_week_date = weekly_horizon["_date"].min()
-        horizon_limit = add_months(first_week_date, 5)
-        after_horizon_weeks = weekly_horizon.loc[
-            weekly_horizon["_date"] >= horizon_limit, "Hafta"
-        ].astype(str).tolist()
+    # Excel export
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        horizontal.to_excel(writer, sheet_name="Yatay Özet")
+        mevcut_hafta_report.to_excel(writer, sheet_name="Mevcut Hafta Palet", index=False)
+        monthly_horizontal.to_excel(writer, sheet_name="Aylık Giriş Çıkış")
+        weekly.to_excel(writer, sheet_name="Veri", index=False)
+        pd.DataFrame([sheet_info]).to_excel(writer, sheet_name="Okunan Sheet Bilgisi", index=False)
+        category_check.to_excel(writer, sheet_name="Kategori Kontrol", index=False)
+        campaign_df.to_excel(writer, sheet_name="Kampanya", index=False)
 
-        st.caption("Kırmızı kolonlar: Total Palet bir önceki haftaya göre artan haftaları gösterir. Açık kırmızı/sol çizgili kolonlar: ilk 5 aydan sonrası için data eksik olabilir; bu alan tam doğru sonucu vermeyebilir.")
+    # Son oluşturulan raporu hafızada tut. Excel kaydında sayılar virgüllü görünür.
+    formatted_report_bytes = format_excel_workbook(output.getvalue())
+    st.session_state["last_report_bytes"] = formatted_report_bytes
+    st.session_state["last_report_default_name"] = f"depo_giris_cikis_raporu_{datetime.now().strftime('%Y%m%d')}"
 
-        styled_horizontal = (
-            horizontal
-            .style
-            .apply(lambda _: highlight_increased_pallet_columns(horizontal, increased_weeks), axis=None)
-            .apply(lambda _: highlight_after_horizon_columns(horizontal, after_horizon_weeks), axis=None)
-            .apply(lambda _: highlight_capacity_and_kpi(horizontal, takip_esigi, kritik_esigi), axis=None)
-            .format(safe_format_cell, na_rep="")
+    st.download_button(
+        label="Excel Raporu İndir",
+        data=st.session_state["last_report_bytes"],
+        file_name="depo_giris_cikis_dashboard_raporu.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
+else:
+    st.info("Soldaki panelden 3 dosyayı yükleyip parametreleri belirledikten sonra 'Raporu Hesapla' butonuna basın.")
+
+
+
+# ------------------------------------------------------------
+# RAPORU GEÇMİŞE KAYDET
+# ------------------------------------------------------------
+st.divider()
+st.subheader("Raporu Geçmişe Kaydet")
+
+if "last_report_bytes" in st.session_state:
+    report_save_name = st.text_input(
+        "Geçmişe kaydetme adı",
+        value=st.session_state.get("last_report_default_name", f"depo_giris_cikis_raporu_{datetime.now().strftime('%Y%m%d')}")
+    )
+
+    if st.button("Geçmişe Kaydet"):
+        clean_name = "".join(
+            ch if ch.isalnum() or ch in [" ", "_", "-"] else "_"
+            for ch in report_save_name.strip()
         )
 
-        st.dataframe(horizontal, use_container_width=True)
+        if not clean_name:
+            clean_name = f"depo_giris_cikis_raporu_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
-        with st.expander("Okunan Kampanya Takvimi"):
-            if campaign_df.empty:
-                st.warning("Kampanya takvimi okunamadı. Kampanya sheetinde kampanya adı, start ve end tarihleri olduğundan emin olun.")
-            else:
-                campaign_view = campaign_df.copy()
-                campaign_view["start"] = campaign_view["start"].dt.strftime("%d.%m.%Y")
-                campaign_view["end"] = campaign_view["end"].dt.strftime("%d.%m.%Y")
-                st.dataframe(campaign_view, use_container_width=True)
+        history_filename = f"{clean_name}.xlsx"
+        history_path = HISTORY_DIR / history_filename
 
-        st.subheader("Mevcut Hafta Palet Tablosu")
-        st.dataframe(
-            mevcut_hafta_report.style.format({
-                "Başlangıç Stok": lambda x: "" if pd.isna(x) else f"{x:,.0f}",
-                "Palet İçi": lambda x: "" if pd.isna(x) else f"{x:,.0f}",
-                "Mevcut Hafta Palet": lambda x: "" if pd.isna(x) else f"{x:,.0f}",
-            }),
-            use_container_width=True
-        )
-
-        st.subheader("Aylık Giriş / Çıkış Toplamları")
-        monthly_horizontal = monthly_report.set_index("Ay").T
-        st.dataframe(monthly_horizontal, use_container_width=True)
-
-        # Ekol data
-        if ekol_file is not None:
-            st.subheader("Ekol Depo Data")
-            ekol_weekly, ekol_capacity = read_ekol_file(ekol_file)
-
-            if ekol_capacity is not None:
-                st.write("Ekol Kapasite Özeti")
-                st.dataframe(ekol_capacity, use_container_width=True)
-
-            if ekol_weekly is not None:
-                st.write("Ekol Haftalık Stok / Doluluk Tablosu")
-                st.dataframe(ekol_weekly, use_container_width=True)
-
-        # Depo ekranının göreceği güvenli operasyon sheet'i
-        depo_export_cols = [
-            "Hafta",
-            "Hafta Başlangıcı",
-            "Kampanya",
-            "Ana Ürün Giriş",
-            "Ana Ürün Çıkış",
-            "Mini Sample Giriş",
-            "Mini Sample Çıkış",
-            "ADR Giriş",
-            "ADR Çıkış",
-        ]
-        depo_export = report[depo_export_cols].copy()
-
-        # Export
-        output = BytesIO()
-        with pd.ExcelWriter(output, engine="openpyxl") as writer:
-            horizontal.to_excel(writer, sheet_name="Yatay Özet")
-            depo_export.to_excel(writer, sheet_name="Depo Operasyon", index=False)
-            mevcut_hafta_report.to_excel(writer, sheet_name="Mevcut Hafta Palet", index=False)
-            monthly_horizontal.to_excel(writer, sheet_name="Aylık Giriş Çıkış")
-            report.to_excel(writer, sheet_name="Veri", index=False)
-            pd.DataFrame([sheet_info]).to_excel(writer, sheet_name="Okunan Sheet Bilgisi", index=False)
-            category_check.to_excel(writer, sheet_name="Kategori Kontrol", index=False)
-            campaign_df.to_excel(writer, sheet_name="Kampanya", index=False)
-
-            # Ekol dosyası yüklendiyse geçmiş rapora da ekle
-            if ekol_file is not None:
-                ekol_weekly_export, ekol_capacity_export = read_ekol_file(ekol_file)
-
-                if ekol_capacity_export is not None:
-                    ekol_capacity_export.to_excel(writer, sheet_name="Ekol Kapasite Özeti", index=False, header=False)
-
-                if ekol_weekly_export is not None:
-                    ekol_weekly_export.to_excel(writer, sheet_name="Ekol Haftalık Stok", index=False)
-
-        formatted_report_bytes = format_excel_workbook(output.getvalue())
-        st.session_state["last_report_bytes"] = formatted_report_bytes
-        st.session_state["last_report_default_name"] = f"depo_giris_cikis_raporu_{datetime.now().strftime('%Y%m%d')}"
-
-        st.download_button(
-            label="Excel Raporu İndir",
-            data=st.session_state["last_report_bytes"],
-            file_name="depo_giris_cikis_dashboard_raporu.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-
-    # Save panel
-    st.divider()
-    st.subheader("Raporu Geçmişe Kaydet")
-
-    if "last_report_bytes" in st.session_state:
-        report_save_name = st.text_input(
-            "Geçmişe kaydetme adı",
-            value=st.session_state.get("last_report_default_name", f"depo_giris_cikis_raporu_{datetime.now().strftime('%Y%m%d')}")
-        )
-
-        if st.button("Geçmişe Kaydet"):
-            clean_name = "".join(
-                ch if ch.isalnum() or ch in [" ", "_", "-"] else "_"
-                for ch in report_save_name.strip()
-            )
-
-            if not clean_name:
-                clean_name = f"depo_giris_cikis_raporu_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-
-            history_filename = f"{clean_name}.xlsx"
+        if history_path.exists():
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            history_filename = f"{clean_name}_{timestamp}.xlsx"
             history_path = HISTORY_DIR / history_filename
 
-            if history_path.exists():
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                history_filename = f"{clean_name}_{timestamp}.xlsx"
-                history_path = HISTORY_DIR / history_filename
+        history_path.write_bytes(st.session_state["last_report_bytes"])
+        st.success(f"Rapor geçmişe kaydedildi: {history_filename}")
+else:
+    st.info("Önce raporu hesaplayın. Rapor hesaplandıktan sonra burada geçmişe kaydedebilirsiniz.")
 
-            history_path.write_bytes(st.session_state["last_report_bytes"])
-            st.success(f"Rapor geçmişe kaydedildi: {history_filename}")
-    else:
-        st.info("Önce raporu hesaplayın. Rapor hesaplandıktan sonra burada geçmişe kaydedebilirsiniz.")
+# ------------------------------------------------------------
+# GEÇMİŞ RAPORLAR
+# ------------------------------------------------------------
+st.divider()
+st.subheader("Geçmiş Raporlar")
 
-    # History
-    st.divider()
-    st.subheader("Geçmiş Raporlar")
+history_files = sorted(HISTORY_DIR.glob("*.xlsx"), reverse=True)
 
-    history_files = sorted(HISTORY_DIR.glob("*.xlsx"), reverse=True)
-
-    if history_files:
-        selected_history = st.selectbox(
-            "Geçmiş rapor seç",
-            options=[f.name for f in history_files]
-        )
-
-        selected_path = HISTORY_DIR / selected_history
-
-        with open(selected_path, "rb") as f:
-            st.download_button(
-                "Seçili Geçmiş Raporu İndir",
-                data=f.read(),
-                file_name=selected_history,
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-
-        if st.button("Seçili Geçmiş Raporu Aç"):
-            xls_history = pd.ExcelFile(selected_path)
-            tabs = st.tabs(xls_history.sheet_names)
-
-            for tab, sheet_name in zip(tabs, xls_history.sheet_names):
-                with tab:
-                    old_df = pd.read_excel(selected_path, sheet_name=sheet_name)
-                    st.dataframe(old_df, use_container_width=True)
-
-        st.caption(f"Toplam kayıtlı rapor sayısı: {len(history_files)}")
-    else:
-        st.info("Henüz geçmiş rapor yok. Raporu oluşturduktan sonra 'Geçmişe Kaydet' butonuna basarsan burada görünür.")
-
-
-def render_depo_screen():
-    show_header("Depo Operasyon Ekranı", "Kayıtlı operasyon raporları")
-
-    with st.sidebar:
-        if st.button("Çıkış Yap"):
-            st.session_state["role"] = None
-            st.rerun()
-
-    st.info("Planning ekranında kaydedilen raporları buradan görüntüleyebilirsiniz.")
-
-    history_files = sorted(HISTORY_DIR.glob("*.xlsx"), reverse=True)
-
-    if not history_files:
-        st.warning("Henüz kayıtlı rapor bulunmuyor. Önce Planning ekranından rapor oluşturup 'Geçmişe Kaydet' yapmalısınız.")
-        return
-
+if history_files:
     selected_history = st.selectbox(
-        "Görüntülenecek raporu seç",
+        "Geçmiş rapor seç",
         options=[f.name for f in history_files]
     )
 
     selected_path = HISTORY_DIR / selected_history
 
-    try:
-        xls_history = pd.ExcelFile(selected_path)
-    except Exception as e:
-        st.error(f"Rapor açılırken hata oluştu: {e}")
-        return
-
-    allowed_sheets = [
-        "Depo Operasyon",
-        "Aylık Giriş Çıkış",
-        "Kampanya",
-        "Ekol Kapasite Özeti",
-        "Ekol Haftalık Stok",
-    ]
-
-    available_allowed_sheets = [s for s in allowed_sheets if s in xls_history.sheet_names]
-
-    if not available_allowed_sheets:
-        st.error("Bu kayıtlı raporda depo ekranı için uygun sheet bulunamadı. Raporu güncel kodla tekrar kaydedin.")
-        return
-
-    tabs = st.tabs(available_allowed_sheets)
-
-    for tab, sheet_name in zip(tabs, available_allowed_sheets):
-        with tab:
-            df = pd.read_excel(selected_path, sheet_name=sheet_name)
-
-            # Planlama hesaplarını gizle; Ekol sheetleri orijinal depo verisi olduğu için dokunma.
-            if sheet_name not in ["Ekol Kapasite Özeti", "Ekol Haftalık Stok"]:
-                hidden_keywords = [
-                    "Palet",
-                    "Tır",
-                    "Kapasite",
-                    "Stok Seviyesi",
-                    "Düşülecek",
-                    "Trend",
-                ]
-
-                visible_cols = [
-                    col for col in df.columns
-                    if not any(keyword.lower() in str(col).lower() for keyword in hidden_keywords)
-                ]
-
-                df = df[visible_cols]
-
-            st.dataframe(
-                df.style.format(safe_format_cell, na_rep=""),
-                use_container_width=True
-            )
-
     with open(selected_path, "rb") as f:
         st.download_button(
-            "Seçili Raporu İndir",
+            "Seçili Geçmiş Raporu İndir",
             data=f.read(),
             file_name=selected_history,
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
+    if st.button("Seçili Geçmiş Raporu Aç"):
+        xls_history = pd.ExcelFile(selected_path)
+        tabs = st.tabs(xls_history.sheet_names)
 
-# ============================================================
-# MAIN
-# ============================================================
-role = login()
+        for tab, sheet_name in zip(tabs, xls_history.sheet_names):
+            with tab:
+                old_df = pd.read_excel(selected_path, sheet_name=sheet_name)
+                st.dataframe(old_df, use_container_width=True)
 
-if role == "planning":
-    render_planning_screen()
-elif role == "depo":
-    render_depo_screen()
+    st.caption(f"Toplam kayıtlı rapor sayısı: {len(history_files)}")
+else:
+    st.info("Henüz geçmiş rapor yok. Raporu oluşturduktan sonra 'Geçmişe Kaydet' butonuna basarsan burada görünür.")
