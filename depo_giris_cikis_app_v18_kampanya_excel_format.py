@@ -429,9 +429,12 @@ def read_apo_file(apo_file):
 def read_ekol_file(ekol_file):
     """
     Ekol depo data dosyasını okur.
-    Beklenen yapı:
-    - Solda haftalık stok tablosu: Depo Yeri / STOK / tarih kolonları
-    - Sağda kapasite özeti: Alan / Kapasite / Doluluk / Boş Lokasyon
+
+    Dosya yapısı:
+    - Solda haftalık tablo:
+      Depo Yeri | STOK | 13.04 | 20.04 | 27.04 | ...
+    - Sağda kapasite özeti:
+      Alan | Kapasite | Doluluk | Boş Lokasyon
     """
     if ekol_file is None:
         return None, None
@@ -445,65 +448,70 @@ def read_ekol_file(ekol_file):
     if raw.empty:
         return None, None
 
-    # Haftalık stok tablosu için tarih olan header satırını bul
-    header_row = None
-    for i in range(min(20, len(raw))):
-        row = raw.iloc[i]
-        date_count = sum(looks_like_date(v) for v in row.tolist())
-        if date_count >= 2:
-            header_row = i
+    # --------------------------------------------------------
+    # 1) Haftalık stok tablosu
+    # --------------------------------------------------------
+    # İlk satır header olarak kullanılır.
+    header = list(raw.iloc[0])
+
+    # Sol tablo, ilk boş kolona kadar devam ediyor.
+    # Örnek: 0 Depo Yeri, 1 STOK, 2-6 haftalar, 7-8 boş.
+    left_cols = []
+    for idx, value in enumerate(header):
+        if idx >= 2 and pd.isna(value):
             break
+        if idx < len(header):
+            left_cols.append(idx)
 
+    # Güvenlik: En az ilk 2 kolon + 1 tarih kolonu yoksa None
     ekol_weekly = None
-    if header_row is not None:
-        headers = list(raw.iloc[header_row])
-        df = raw.iloc[header_row + 1:].copy()
-        df.columns = headers
-        df = df.dropna(how="all")
+    if len(left_cols) >= 3:
+        weekly_raw = raw.iloc[:, left_cols].copy()
+        weekly_raw.columns = weekly_raw.iloc[0]
+        weekly_raw = weekly_raw.iloc[1:].copy()
+        weekly_raw = weekly_raw.dropna(how="all")
 
-        # Sağ taraftaki kapasite kolonlarını ayırmak için ilk tamamen boş kolona kadar al
-        # Örnek dosyada 0-6 haftalık tablo, 7-8 boş, 9 sonrası kapasite özeti.
-        valid_cols = []
-        for col in df.columns:
+        # Kolon adlarını temizle
+        new_cols = []
+        for col in weekly_raw.columns:
             if pd.isna(col):
-                break
-            valid_cols.append(col)
+                new_cols.append("")
+            elif isinstance(col, (int, float, np.integer, np.floating)):
+                # 13.04 gibi başlıkları 13.04 olarak göster
+                new_cols.append(f"{float(col):.2f}")
+            else:
+                new_cols.append(str(col).strip())
 
-        if len(valid_cols) >= 3:
-            ekol_weekly = df[valid_cols].copy()
-            ekol_weekly = ekol_weekly.dropna(how="all")
+        weekly_raw.columns = new_cols
+        ekol_weekly = weekly_raw.reset_index(drop=True)
 
-            # Tarih kolonlarını okunabilir formata çevir
-            new_cols = []
-            for col in ekol_weekly.columns:
-                dt = excel_serial_to_date(col)
-                if not pd.isna(dt):
-                    new_cols.append(dt.strftime("%d.%m.%Y"))
-                else:
-                    new_cols.append(str(col))
-            ekol_weekly.columns = new_cols
-
-    # Kapasite özetini bul: header satırında Alan / Kapasite / Doluluk / Boş Lokasyon olan yer
+    # --------------------------------------------------------
+    # 2) Kapasite özeti
+    # --------------------------------------------------------
     ekol_capacity = None
 
-    for i in range(min(20, len(raw))):
-        row = raw.iloc[i].tolist()
-        clean_row = [clean_text(v) for v in row]
-
-        if "alan" in clean_row and "kapasite" in clean_row:
-            alan_idx = clean_row.index("alan")
-            cap_cols = row[alan_idx:alan_idx + 4]
-            cap_df = raw.iloc[i + 1:i + 8, alan_idx:alan_idx + 4].copy()
-            cap_df.columns = cap_cols
-            cap_df = cap_df.dropna(how="all")
-
-            # Sadece Alan dolu olanları al
-            first_col = cap_df.columns[0]
-            cap_df = cap_df[cap_df[first_col].notna()]
-            ekol_capacity = cap_df.reset_index(drop=True)
+    # Header satırında "Alan" olan kolonu bul
+    alan_col = None
+    for idx, value in enumerate(header):
+        if clean_text(value) == "alan":
+            alan_col = idx
             break
 
+    if alan_col is not None:
+        capacity_raw = raw.iloc[:, alan_col:alan_col + 4].copy()
+        capacity_raw.columns = capacity_raw.iloc[0]
+        capacity_raw = capacity_raw.iloc[1:].copy()
+        capacity_raw = capacity_raw.dropna(how="all")
+
+        # Alan kolonu dolu olanları al
+        first_col = capacity_raw.columns[0]
+        capacity_raw = capacity_raw[capacity_raw[first_col].notna()]
+
+        ekol_capacity = capacity_raw.reset_index(drop=True)
+
     return ekol_weekly, ekol_capacity
+
+
 
 
 def format_numeric_dataframe(df):
