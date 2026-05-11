@@ -728,6 +728,11 @@ def prepare_report(
             weekly[col] = 0
 
     report = pd.DataFrame()
+
+    # Cloud ortamında week_start bazen Period/obj olarak gelebiliyor.
+    # Bu yüzden strftime öncesinde kesin datetime'a çeviriyoruz.
+    weekly["week_start"] = pd.to_datetime(weekly["week_start"], errors="coerce")
+
     report["Hafta"] = weekly["week_start"].dt.strftime("%Y-W%U")
     report["Hafta Başlangıcı"] = weekly["week_start"].dt.strftime("%d.%m.%Y")
     report["Kampanya"] = weekly["week_start"].apply(lambda x: assign_campaign(x, campaign_df))
