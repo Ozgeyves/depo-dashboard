@@ -886,7 +886,16 @@ if calculate:
         report = pd.DataFrame()
         weekly["week_start"] = pd.to_datetime(weekly["week_start"].astype(str), errors="coerce")
     report["Hafta"] = weekly["week_start"].dt.strftime("%Y-W%U")
-        report["Hafta Başlangıcı"] = weekly["week_start"].dt.strftime("%d.%m.%Y")
+        weekly["week_start"] = pd.to_datetime(
+    weekly["week_start"].astype(str),
+    errors="coerce"
+)
+
+report["Hafta"] = weekly["week_start"].dt.strftime("%Y-W%U")
+
+report["Hafta Başlangıcı"] = weekly["week_start"].dt.strftime(
+    "%d.%m.%Y"
+)
         report["Kampanya"] = weekly["week_start"].apply(lambda x: assign_campaign(x, campaign_df))
 
         report["Ana Ürün Giriş"] = weekly["inbound_qty_Ana Ürün"]
