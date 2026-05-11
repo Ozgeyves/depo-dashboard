@@ -1193,7 +1193,7 @@ def render_planning_screen():
             .format(safe_format_cell, na_rep="")
         )
 
-        st.dataframe(styled_horizontal, use_container_width=True)
+        st.dataframe(horizontal, use_container_width=True)
 
         with st.expander("Okunan Kampanya Takvimi"):
             if campaign_df.empty:
@@ -1216,10 +1216,7 @@ def render_planning_screen():
 
         st.subheader("Aylık Giriş / Çıkış Toplamları")
         monthly_horizontal = monthly_report.set_index("Ay").T
-        st.dataframe(
-            monthly_horizontal.style.format(safe_format_cell, na_rep=""),
-            use_container_width=True
-        )
+        st.dataframe(monthly_horizontal, use_container_width=True)
 
         # Ekol data
         if ekol_file is not None:
