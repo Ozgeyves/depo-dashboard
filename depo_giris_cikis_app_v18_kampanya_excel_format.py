@@ -16,6 +16,31 @@ HISTORY_DIR = APP_DIR / "gecmis_raporlar"
 HISTORY_DIR.mkdir(exist_ok=True)
 
 # ------------------------------------------------------------
+# GİRİŞ / ROL SEÇİMİ
+# ------------------------------------------------------------
+if "role" not in st.session_state:
+    st.session_state["role"] = None
+
+if st.session_state["role"] is None:
+    st.title("Depo Dashboard")
+    st.caption("Giriş için şifrenizi yazın.")
+
+    password = st.text_input("Şifre", type="password")
+
+    if st.button("Giriş Yap"):
+        if password.strip().lower() == "tedarik":
+            st.session_state["role"] = "tedarik"
+            st.rerun()
+        elif password.strip().lower() == "depo":
+            st.session_state["role"] = "depo"
+            st.rerun()
+        else:
+            st.error("Şifre hatalı.")
+
+    st.stop()
+
+
+# ------------------------------------------------------------
 # HELPERS
 # ------------------------------------------------------------
 def excel_serial_to_date(value):
@@ -743,6 +768,105 @@ def format_excel_workbook(excel_bytes):
     out = BytesIO()
     wb.save(out)
     return out.getvalue()
+
+
+
+# ------------------------------------------------------------
+# DEPO EKRANI
+# ------------------------------------------------------------
+if st.session_state["role"] == "depo":
+    st.title("Depo Operasyon Ekranı")
+
+    if st.sidebar.button("Çıkış Yap"):
+        st.session_state["role"] = None
+        st.rerun()
+
+    history_files = sorted(HISTORY_DIR.glob("*.xlsx"), reverse=True)
+
+    if not history_files:
+        st.warning("Henüz kayıtlı rapor yok. Rapor önce tedarik ekranından kaydedilmelidir.")
+        st.stop()
+
+    selected_history = st.selectbox(
+        "Kayıtlı rapor seç",
+        options=[f.name for f in history_files]
+    )
+
+    selected_path = HISTORY_DIR / selected_history
+
+    try:
+        xls_history = pd.ExcelFile(selected_path)
+    except Exception as e:
+        st.error(f"Rapor açılırken hata oluştu: {e}")
+        st.stop()
+
+    allowed_sheets = [
+        "Depo Operasyon",
+        "Aylık Giriş Çıkış",
+        "Kampanya",
+        "Ekol Kapasite Özeti",
+        "Ekol Haftalık Stok",
+    ]
+
+    available_sheets = [s for s in allowed_sheets if s in xls_history.sheet_names]
+
+    # Eski kayıtlarda Depo Operasyon sheet'i yoksa Veri sheetinden güvenli kolonları çıkar.
+    if not available_sheets and "Veri" in xls_history.sheet_names:
+        available_sheets = ["Veri"]
+
+    if not available_sheets:
+        st.warning("Bu raporda depo ekranında gösterilecek uygun veri bulunamadı.")
+        st.stop()
+
+    tabs = st.tabs(available_sheets)
+
+    hidden_keywords = [
+        "Palet",
+        "Tır",
+        "Kapasite Kullanım",
+        "Kalan Kapasite",
+        "Stok Seviyesi",
+        "Düşülecek",
+        "Trend",
+        "pallet",
+        "truck",
+    ]
+
+    for tab, sheet_name in zip(tabs, available_sheets):
+        with tab:
+            df = pd.read_excel(selected_path, sheet_name=sheet_name)
+
+            if sheet_name == "Veri":
+                safe_cols = [
+                    "Hafta",
+                    "Hafta Başlangıcı",
+                    "Kampanya",
+                    "Ana Ürün Giriş",
+                    "Ana Ürün Çıkış",
+                    "Mini Sample Giriş",
+                    "Mini Sample Çıkış",
+                    "ADR Giriş",
+                    "ADR Çıkış",
+                ]
+                df = df[[c for c in safe_cols if c in df.columns]]
+            elif sheet_name not in ["Ekol Kapasite Özeti", "Ekol Haftalık Stok"]:
+                visible_cols = [
+                    col for col in df.columns
+                    if not any(k.lower() in str(col).lower() for k in hidden_keywords)
+                ]
+                df = df[visible_cols]
+
+            st.dataframe(df, use_container_width=True, height=520)
+
+    with open(selected_path, "rb") as f:
+        st.download_button(
+            "Seçili Raporu İndir",
+            data=f.read(),
+            file_name=selected_history,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+    st.stop()
 
 
 # ------------------------------------------------------------
