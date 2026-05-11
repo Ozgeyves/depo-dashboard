@@ -425,6 +425,105 @@ def read_apo_file(apo_file):
     return long_df
 
 
+
+def read_ekol_file(ekol_file):
+    """
+    Ekol depo data dosyasını okur.
+    Beklenen yapı:
+    - Solda haftalık stok tablosu: Depo Yeri / STOK / tarih kolonları
+    - Sağda kapasite özeti: Alan / Kapasite / Doluluk / Boş Lokasyon
+    """
+    if ekol_file is None:
+        return None, None
+
+    xls = pd.ExcelFile(ekol_file)
+    sheet_name = xls.sheet_names[0]
+
+    raw = pd.read_excel(ekol_file, sheet_name=sheet_name, header=None)
+    raw = raw.dropna(how="all")
+
+    if raw.empty:
+        return None, None
+
+    # Haftalık stok tablosu için tarih olan header satırını bul
+    header_row = None
+    for i in range(min(20, len(raw))):
+        row = raw.iloc[i]
+        date_count = sum(looks_like_date(v) for v in row.tolist())
+        if date_count >= 2:
+            header_row = i
+            break
+
+    ekol_weekly = None
+    if header_row is not None:
+        headers = list(raw.iloc[header_row])
+        df = raw.iloc[header_row + 1:].copy()
+        df.columns = headers
+        df = df.dropna(how="all")
+
+        # Sağ taraftaki kapasite kolonlarını ayırmak için ilk tamamen boş kolona kadar al
+        # Örnek dosyada 0-6 haftalık tablo, 7-8 boş, 9 sonrası kapasite özeti.
+        valid_cols = []
+        for col in df.columns:
+            if pd.isna(col):
+                break
+            valid_cols.append(col)
+
+        if len(valid_cols) >= 3:
+            ekol_weekly = df[valid_cols].copy()
+            ekol_weekly = ekol_weekly.dropna(how="all")
+
+            # Tarih kolonlarını okunabilir formata çevir
+            new_cols = []
+            for col in ekol_weekly.columns:
+                dt = excel_serial_to_date(col)
+                if not pd.isna(dt):
+                    new_cols.append(dt.strftime("%d.%m.%Y"))
+                else:
+                    new_cols.append(str(col))
+            ekol_weekly.columns = new_cols
+
+    # Kapasite özetini bul: header satırında Alan / Kapasite / Doluluk / Boş Lokasyon olan yer
+    ekol_capacity = None
+
+    for i in range(min(20, len(raw))):
+        row = raw.iloc[i].tolist()
+        clean_row = [clean_text(v) for v in row]
+
+        if "alan" in clean_row and "kapasite" in clean_row:
+            alan_idx = clean_row.index("alan")
+            cap_cols = row[alan_idx:alan_idx + 4]
+            cap_df = raw.iloc[i + 1:i + 8, alan_idx:alan_idx + 4].copy()
+            cap_df.columns = cap_cols
+            cap_df = cap_df.dropna(how="all")
+
+            # Sadece Alan dolu olanları al
+            first_col = cap_df.columns[0]
+            cap_df = cap_df[cap_df[first_col].notna()]
+            ekol_capacity = cap_df.reset_index(drop=True)
+            break
+
+    return ekol_weekly, ekol_capacity
+
+
+def format_numeric_dataframe(df):
+    """
+    Ekranda sayıları virgüllü göstermek için object'e çevrilmiş güvenli tablo döndürür.
+    Büyük style kullanımını önlemek için st.dataframe'e düz dataframe veriyoruz.
+    """
+    if df is None:
+        return None
+
+    out = df.copy()
+
+    for col in out.columns:
+        numeric = pd.to_numeric(out[col], errors="coerce")
+        if numeric.notna().sum() > 0 and numeric.notna().sum() >= max(1, len(out) * 0.4):
+            out[col] = numeric.map(lambda x: "" if pd.isna(x) else f"{x:,.0f}")
+
+    return out
+
+
 def add_product_type(df, type_map, adr_codes):
     """
     Ana/Mini kırılımını oluşturur.
@@ -654,6 +753,7 @@ with st.sidebar:
     supply_file = st.file_uploader("Supply dosyası", type=["xlsx", "xlsm"])
     apo_file = st.file_uploader("APO Forecast dosyası", type=["xlsx", "xlsm"])
     mapping_file = st.file_uploader("Ürün Tipi + Kampanya + ADR dosyası", type=["xlsx", "xlsm"])
+    ekol_file = st.file_uploader("Ekol Depo Data Dosyası", type=["xlsx", "xlsm"])
 
     st.header("Palet Parametreleri")
     ana_palet_ici = st.number_input("Ana Ürün Palet İçi", min_value=1, value=2400, step=50)
@@ -1098,6 +1198,38 @@ if calculate:
     monthly_horizontal = monthly_report.set_index("Ay").T
     st.dataframe(monthly_horizontal, use_container_width=True, height=360)
 
+    # Ekol Depo Data
+    ekol_weekly = None
+    ekol_capacity = None
+
+    if ekol_file is not None:
+        st.subheader("Ekol Depo Data")
+
+        try:
+            ekol_weekly, ekol_capacity = read_ekol_file(ekol_file)
+
+            if ekol_capacity is not None:
+                st.write("Ekol Kapasite Özeti")
+                st.dataframe(
+                    format_numeric_dataframe(ekol_capacity),
+                    use_container_width=True,
+                    height=220
+                )
+
+            if ekol_weekly is not None:
+                st.write("Ekol Haftalık Stok / Doluluk Tablosu")
+                st.dataframe(
+                    format_numeric_dataframe(ekol_weekly),
+                    use_container_width=True,
+                    height=420
+                )
+
+            if ekol_weekly is None and ekol_capacity is None:
+                st.warning("Ekol dosyası okundu ancak uygun tablo bulunamadı.")
+
+        except Exception as e:
+            st.error(f"Ekol dosyası okunurken hata oluştu: {e}")
+
     # Excel export
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
@@ -1108,6 +1240,13 @@ if calculate:
         pd.DataFrame([sheet_info]).to_excel(writer, sheet_name="Okunan Sheet Bilgisi", index=False)
         category_check.to_excel(writer, sheet_name="Kategori Kontrol", index=False)
         campaign_df.to_excel(writer, sheet_name="Kampanya", index=False)
+
+        if ekol_file is not None:
+            if ekol_capacity is not None:
+                ekol_capacity.to_excel(writer, sheet_name="Ekol Kapasite Özeti", index=False)
+
+            if ekol_weekly is not None:
+                ekol_weekly.to_excel(writer, sheet_name="Ekol Haftalık Stok", index=False)
 
     # Son oluşturulan raporu hafızada tut. Excel kaydında sayılar virgüllü görünür.
     formatted_report_bytes = format_excel_workbook(output.getvalue())
